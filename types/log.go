@@ -1,14 +1,8 @@
 package types
 
 type LogEntry struct {
-	Term    Term
-	Command Command
+	Term    int    `json:"term"`
+	Command string `json:"command"` // e.g., "SET key value"
+	Key     string `json:"key"`
+	Value   any    `json:"value"`
 }
-
-type Command struct {
-	Key   Key
-	Value Value
-}
-
-type Key string
-type Value string

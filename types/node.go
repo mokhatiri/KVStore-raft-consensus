@@ -1,14 +1,13 @@
 package types
 
-type NodeID string
-type Address string
-type Role int
+import "sync"
 
-const (
-	Follower Role = iota
-	Candidate
-	Leader
-)
-
-type Term uint64
-type CommitIndex uint64
+type Node struct {
+	ID        int        `json:"id"`
+	Address   string     `json:"address"` // e.g., "localhost:8080"
+	Peers     []string   `json:"peers"`
+	Role      string     `json:"role"` // Leader, Follower, Candidate
+	Log       []LogEntry `json:"log"`
+	CommitIdx int        `json:"commit_index"`
+	mu        sync.RWMutex
+}
