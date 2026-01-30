@@ -9,5 +9,5 @@ type Node struct {
 	Role      string     `json:"role"` // Leader, Follower, Candidate
 	Log       []LogEntry `json:"log"`
 	CommitIdx int        `json:"commit_index"`
-	mu        sync.RWMutex
+	Mu        sync.RWMutex
 }
