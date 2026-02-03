@@ -1,12 +1,12 @@
-package storage
+package storage_test
 
 import (
 	"testing"
+	"distributed-kv/storage"
 )
 
 func TestStoreSet(t *testing.T) {
-	store := NewStore()
-
+	store := storage.NewStore()
 	store.Set("key1", "value1")
 	value, exists := store.Get("key1")
 
@@ -20,7 +20,7 @@ func TestStoreSet(t *testing.T) {
 }
 
 func TestStoreGet(t *testing.T) {
-	store := NewStore()
+	store := storage.NewStore()
 
 	// Try to get a non-existent key
 	value, exists := store.Get("nonexistent")
@@ -35,7 +35,7 @@ func TestStoreGet(t *testing.T) {
 }
 
 func TestStoreDelete(t *testing.T) {
-	store := NewStore()
+	store := storage.NewStore()
 
 	store.Set("key1", "value1")
 	store.Delete("key1")
@@ -52,7 +52,7 @@ func TestStoreDelete(t *testing.T) {
 }
 
 func TestStoreGetAll(t *testing.T) {
-	store := NewStore()
+	store := storage.NewStore()
 
 	store.Set("key1", "value1")
 	store.Set("key2", "value2")
@@ -78,7 +78,7 @@ func TestStoreGetAll(t *testing.T) {
 }
 
 func TestStoreConcurrency(t *testing.T) {
-	store := NewStore()
+	store := storage.NewStore()
 
 	// Write from multiple goroutines
 	for i := 0; i < 10; i++ {

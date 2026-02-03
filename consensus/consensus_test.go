@@ -94,7 +94,7 @@ func TestAppendEntriesHigherTerm(t *testing.T) {
 		},
 	}
 
-	err := rc.AppendEntries(2, 2, entries)
+	err := rc.AppendEntries(2, 2, 0, 0, 0, entries)
 
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
@@ -116,7 +116,7 @@ func TestAppendEntriesLowerTerm(t *testing.T) {
 
 	entries := []types.LogEntry{}
 
-	err := rc.AppendEntries(2, 2, entries)
+	err := rc.AppendEntries(2, 2, 0, 0, 0, entries)
 
 	if err == nil {
 		t.Errorf("Expected error for lower term, got nil")
@@ -140,7 +140,7 @@ func TestAppendEntriesAppendsToLog(t *testing.T) {
 		},
 	}
 
-	rc.AppendEntries(1, 2, entries)
+	rc.AppendEntries(1, 2, 0, 0, 0, entries)
 
 	// Check if entries were appended to node.Log
 	node.Mu.RLock()

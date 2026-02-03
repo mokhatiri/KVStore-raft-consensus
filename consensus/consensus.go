@@ -6,16 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"distributed-kv/rpc"
 	"distributed-kv/storage"
 	"distributed-kv/types"
-	// "distributed-kv/rpc"
 )
-
-type Consensus interface {
-	RequestVote(term int, candidateId int) (granted bool)
-	AppendEntries(term int, leaderId int, entries []types.LogEntry) error
-	Start()
-}
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -43,6 +37,18 @@ type RaftConsensus struct {
 	// ID, Address, Peers, Role, Log, CommitIdx
 }
 
+func (rc *RaftConsensus) GetCurrentTerm() int {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.currentTerm
+}
+
+func (rc *RaftConsensus) GetVotedFor() int {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.votedFor
+}
+
 func NewRaftConsensus(node *types.Node, store *storage.Store) *RaftConsensus {
 	return &RaftConsensus{
 		currentTerm: 0,
@@ -62,7 +68,8 @@ func NewRaftConsensus(node *types.Node, store *storage.Store) *RaftConsensus {
 	}
 }
 
-/* RequestVote : used by candidates to gather votes.
+/*
+	RequestVote : used by candidates to gather votes.
 
 - the point of voting is to ensure that
 only one leader is elected
@@ -74,10 +81,8 @@ if the candidate's term is higher than
 the current term, the node votes for the candidate.
 if it's the same term, the node checks if it has already voted
 and votes accordingly.
-
 */
-
-func (rc *RaftConsensus) RequestVote(term int, candidateId int) (granted bool) {
+func (rc *RaftConsensus) RequestVote(term int, candidateId int) bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
@@ -95,7 +100,8 @@ func (rc *RaftConsensus) RequestVote(term int, candidateId int) (granted bool) {
 	return false // vote not granted
 }
 
-/* AppendEntries : used by leaders to replicate log entries.
+/*
+	AppendEntries : used by leaders to replicate log entries.
 
 - the point of the log is to ensure that
 all nodes have the same sequence of
@@ -108,11 +114,8 @@ if the term is older than the current term,
 the entries are ignored.
 if the leader is alive it will keep sending heartbeats, and don't start election
 it basically tells the followers "i'm still here"
-
-
 */
-
-func (rc *RaftConsensus) AppendEntries(term int, leaderId int, entries []types.LogEntry) error {
+func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int, prevLogTerm int, leaderCommit int, entries []types.LogEntry) error {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 
@@ -132,20 +135,47 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, entries []types.L
 	// if it's the same term, do nothing
 	// because the node is already in sync with the leader
 
+	// Step down if we're a candidate and receive AppendEntries from a valid leader
+	rc.node.Mu.Lock()
+	if rc.node.Role != "Follower" {
+		rc.node.Role = "Follower"
+	}
+	rc.node.Mu.Unlock()
+
+	// Verify log consistency: check if we have the prevLogIndex entry with prevLogTerm
+	rc.node.Mu.RLock()
+	logLen := len(rc.node.Log)
+	rc.node.Mu.RUnlock()
+
+	if prevLogIndex > 0 && (logLen < prevLogIndex || (logLen >= prevLogIndex && rc.node.Log[prevLogIndex-1].Term != prevLogTerm)) {
+		// Log doesn't match at prevLogIndex, reject the append
+		return fmt.Errorf("log mismatch at index %d, expected term %d", prevLogIndex, prevLogTerm)
+	}
+
 	// append new entries to the log
 	if len(entries) > 0 {
 		rc.node.Mu.Lock()
+		// If entries conflict with existing entries, overwrite them
+		if prevLogIndex > 0 && logLen > prevLogIndex {
+			// Remove conflicting entries
+			rc.node.Log = rc.node.Log[:prevLogIndex]
+		}
 		rc.node.Log = append(rc.node.Log, entries...) // append new entries to the log
 		rc.node.Mu.Unlock()
 	}
 
-	// TODO : verify log consistency before updating commit index
+	// Update commitIndex if leader's commit is higher
+	if leaderCommit > rc.node.CommitIdx {
+		rc.node.CommitIdx = leaderCommit
+	}
+
 	rc.lastApplied += len(entries)
 
 	return nil
 }
 
-/* Start : starts the Raft consensus algorithm.
+/*
+	Start : starts the Raft consensus algorithm.
 
 - RAFT works by having nodes transition between
 three states: Follower, Candidate, and Leader.
@@ -165,9 +195,7 @@ Start handles these state transitions
 and message handling.
 
 it's a go routine because it runs concurrently with other parts of the system.
-
 */
-
 func (rc *RaftConsensus) Start() {
 	go func() {
 		for {
@@ -182,42 +210,38 @@ func (rc *RaftConsensus) Start() {
 					rc.currentTerm += 1
 					rc.votedFor = rc.node.ID
 
-					// TODO : uncomment when RPC is implemented
-					// votesCh := make(chan bool, len(rc.node.Peers))
+					votesCh := make(chan bool, len(rc.node.Peers))
 
-					// TODO : uncomment when RPC is implemented
-					// ---
-					// for _, peerAddr := range rc.node.Peers {
-					// 	// for every peer, send RequestVote RPC
-					// 	go func(addr string) {
-					// 		// TODO : implement RPC client to send RequestVote
-					// 		_ = addr
-					// 		granted := rpc.SendRequestVote(addr, rc.currentTerm, rc.node.ID)
-					// 		votesCh <- granted
-					// 	}(peerAddr)
-					// }
-
-					// TODO : Uncomment the following lines when RPC is implemented
-					// ---
-					// votesGranted := 1 // count self-vote
-					// for range rc.node.Peers {
-					// 	granted := <-votesCh
-					// 	if granted {
-					// 		votesGranted += 1
-					// 	}
-					// }
-					// // if majority, become leader
-					// if votesGranted > len(rc.node.Peers)/2 {
-					// 	rc.node.Role = "Leader"
-					// }
-
-					// TODO : delete when RPC is implemented
-					votesGranted := len(rc.node.Peers)/2 + 1 // simulate majority
-					if votesGranted > len(rc.node.Peers)/2 {
-						rc.node.Role = "Leader"
+					for _, peerAddr := range rc.node.Peers {
+						// for every peer, send RequestVote RPC
+						go func(addr string) {
+							lastLogIdx := len(rc.node.Log)
+							lastLogTerm := 0
+							if lastLogIdx > 0 {
+								lastLogTerm = rc.node.Log[lastLogIdx-1].Term
+							}
+							granted, _, err := rpc.SendRequestVote(addr, rc.currentTerm, rc.node.ID, lastLogIdx, lastLogTerm)
+							if err == nil {
+								votesCh <- granted
+							} else {
+								votesCh <- false
+							}
+						}(peerAddr)
 					}
 
-					// TODO : if appendEntries received, become follower
+					votesGranted := 1 // count self-vote
+					for range rc.node.Peers {
+						granted := <-votesCh
+						if granted {
+							votesGranted += 1
+						}
+					}
+					// if majority, become leader
+					if votesGranted > len(rc.node.Peers)/2 {
+						rc.node.Role = "Leader"
+					} else {
+						rc.node.Role = "Follower"
+					}
 				}
 				rc.node.Mu.Unlock()
 				rc.mu.Unlock()
@@ -231,13 +255,28 @@ func (rc *RaftConsensus) Start() {
 				rc.node.Mu.Lock()
 
 				if rc.node.Role == "Leader" {
-					// TODO : send AppendEntries RPCs to peers
-				}
+					for i, peerAddr := range rc.node.Peers {
+						// Calculate nextIndex (next log entry to send to this follower)
+						nextIdx := rc.nextIndex[i]
+						prevLogIdx := nextIdx - 1
+						prevLogTerm := 0
+						if prevLogIdx > 0 && prevLogIdx <= len(rc.node.Log) {
+							prevLogTerm = rc.node.Log[prevLogIdx-1].Term
+						}
 
+						// Send entries starting from nextIndex
+						entries := []types.LogEntry{}
+						if nextIdx <= len(rc.node.Log) {
+							entries = rc.node.Log[nextIdx-1:]
+						}
+
+						go rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries)
+					}
+
+					rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
+				}
 				rc.node.Mu.Unlock()
 				rc.mu.Unlock()
-
-				rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
 			}
 		}
 	}()
