@@ -3,7 +3,6 @@ package rpc_test
 import (
 	"distributed-kv/consensus"
 	"distributed-kv/rpc"
-	"distributed-kv/storage"
 	"distributed-kv/types"
 	"net"
 	netRpc "net/rpc"
@@ -53,7 +52,7 @@ func (mc *MockConsensus) Start() {
 // Helper function to start a test RPC server with its own registry
 func startTestServer(consensus types.ConsensusModule, address string) error {
 	raftServer := rpc.NewRaftServer(consensus)
-	
+
 	// Create a new RPC server instance to avoid conflicts with global registry
 	server := netRpc.NewServer()
 	err := server.Register(raftServer)
@@ -228,7 +227,6 @@ func TestAppendEntriesConnectionFailure(t *testing.T) {
 
 func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 	// Create a real RaftConsensus instance
-	store := storage.NewStore()
 	node := &types.Node{
 		ID:        1,
 		Address:   "localhost:9005",
@@ -237,7 +235,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 		Log:       []types.LogEntry{},
 		CommitIdx: 0,
 	}
-	raftConsensus := consensus.NewRaftConsensus(node, store)
+	raftConsensus := consensus.NewRaftConsensus(node)
 
 	address := "localhost:9005"
 

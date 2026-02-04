@@ -62,7 +62,7 @@ func (rs *RaftServer) AppendEntries(args *AppendEntriesArgs, reply *AppendEntrie
 
 // StartServer registers the RPC server and listens for incoming requests
 func StartServer(consensus types.ConsensusModule, address string) error {
-	raftServer := NewRaftServer(consensus)
+	raftServer := NewRaftServer(consensus) // starts a new RPC server instance
 
 	// register the RPC server using net/rpc
 	err := rpc.Register(raftServer)
@@ -71,7 +71,7 @@ func StartServer(consensus types.ConsensusModule, address string) error {
 	}
 
 	// listen on the address
-	listener, err := net.Listen("tcp", address)
+	listener, err := net.Listen("tcp", address) // listening on the given address
 	if err != nil {
 		return err
 	}

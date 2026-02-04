@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"distributed-kv/rpc"
-	"distributed-kv/storage"
 	"distributed-kv/types"
 )
 
@@ -26,8 +25,6 @@ type RaftConsensus struct {
 	matchIndex []int // For leaders, index of highest log entry known to be replicated on each follower
 
 	applyCh chan ApplyMsg
-	store   *storage.Store
-	// persister *Persister // persistent storage for Raft state
 
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
@@ -49,7 +46,7 @@ func (rc *RaftConsensus) GetVotedFor() int {
 	return rc.votedFor
 }
 
-func NewRaftConsensus(node *types.Node, store *storage.Store) *RaftConsensus {
+func NewRaftConsensus(node *types.Node) *RaftConsensus {
 	return &RaftConsensus{
 		currentTerm: 0,
 		votedFor:    -1,
@@ -59,7 +56,6 @@ func NewRaftConsensus(node *types.Node, store *storage.Store) *RaftConsensus {
 		matchIndex: make([]int, len(node.Peers)),
 
 		applyCh: make(chan ApplyMsg), // channel to apply committed log entries
-		store:   store,               // persistent storage to store Raft state
 
 		electionTimer:  time.NewTimer(ElectionTimeoutMs * time.Millisecond),   // can be updated
 		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond), // heartbeat interval
@@ -239,6 +235,27 @@ func (rc *RaftConsensus) Start() {
 					// if majority, become leader
 					if votesGranted > len(rc.node.Peers)/2 {
 						rc.node.Role = "Leader"
+						// Initialize nextIndex and matchIndex for all peers
+						logLen := len(rc.node.Log)
+						for i := range rc.node.Peers {
+							rc.nextIndex[i] = logLen + 1 // nextIndex should start at log length + 1
+							rc.matchIndex[i] = 0
+						}
+						// Immediately send heartbeats to all followers to establish leadership
+						for i, peerAddr := range rc.node.Peers {
+							nextIdx := rc.nextIndex[i]
+							prevLogIdx := nextIdx - 1
+							prevLogTerm := 0
+							if prevLogIdx > 0 && prevLogIdx <= len(rc.node.Log) {
+								prevLogTerm = rc.node.Log[prevLogIdx-1].Term
+							}
+							entries := []types.LogEntry{}
+							if nextIdx <= len(rc.node.Log) {
+								entries = rc.node.Log[nextIdx-1:]
+							}
+							go rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries)
+						}
+						rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
 					} else {
 						rc.node.Role = "Follower"
 					}

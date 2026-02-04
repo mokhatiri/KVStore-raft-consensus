@@ -1,13 +1,11 @@
 package consensus
 
 import (
-	"distributed-kv/storage"
 	"distributed-kv/types"
 	"testing"
 )
 
-func setupTestNode(id int) (*types.Node, *storage.Store) {
-	store := storage.NewStore()
+func setupTestNode(id int) *types.Node {
 	node := &types.Node{
 		ID:        id,
 		Address:   "localhost:8000",
@@ -16,12 +14,12 @@ func setupTestNode(id int) (*types.Node, *storage.Store) {
 		Log:       []types.LogEntry{},
 		CommitIdx: 0,
 	}
-	return node, store
+	return node
 }
 
 func TestRequestVoteHigherTerm(t *testing.T) {
-	node, store := setupTestNode(1)
-	rc := NewRaftConsensus(node, store)
+	node := setupTestNode(1)
+	rc := NewRaftConsensus(node)
 
 	// Candidate from term 2 requests vote
 	granted := rc.RequestVote(2, 2)
@@ -40,8 +38,8 @@ func TestRequestVoteHigherTerm(t *testing.T) {
 }
 
 func TestRequestVoteSameTerm(t *testing.T) {
-	node, store := setupTestNode(1)
-	rc := NewRaftConsensus(node, store)
+	node := setupTestNode(1)
+	rc := NewRaftConsensus(node)
 
 	// First vote in term 1
 	granted1 := rc.RequestVote(1, 2)
@@ -63,8 +61,8 @@ func TestRequestVoteSameTerm(t *testing.T) {
 }
 
 func TestRequestVoteLowerTerm(t *testing.T) {
-	node, store := setupTestNode(1)
-	rc := NewRaftConsensus(node, store)
+	node := setupTestNode(1)
+	rc := NewRaftConsensus(node)
 
 	// Set current term to 3
 	rc.currentTerm = 3
@@ -82,8 +80,8 @@ func TestRequestVoteLowerTerm(t *testing.T) {
 }
 
 func TestAppendEntriesHigherTerm(t *testing.T) {
-	node, store := setupTestNode(1)
-	rc := NewRaftConsensus(node, store)
+	node := setupTestNode(1)
+	rc := NewRaftConsensus(node)
 
 	entries := []types.LogEntry{
 		{
@@ -110,8 +108,8 @@ func TestAppendEntriesHigherTerm(t *testing.T) {
 }
 
 func TestAppendEntriesLowerTerm(t *testing.T) {
-	node, store := setupTestNode(1)
-	rc := NewRaftConsensus(node, store)
+	node := setupTestNode(1)
+	rc := NewRaftConsensus(node)
 	rc.currentTerm = 3
 
 	entries := []types.LogEntry{}
@@ -128,8 +126,8 @@ func TestAppendEntriesLowerTerm(t *testing.T) {
 }
 
 func TestAppendEntriesAppendsToLog(t *testing.T) {
-	node, store := setupTestNode(1)
-	rc := NewRaftConsensus(node, store)
+	node := setupTestNode(1)
+	rc := NewRaftConsensus(node)
 
 	entries := []types.LogEntry{
 		{
@@ -153,8 +151,8 @@ func TestAppendEntriesAppendsToLog(t *testing.T) {
 }
 
 func TestRaftConsensusInitialization(t *testing.T) {
-	node, store := setupTestNode(1)
-	rc := NewRaftConsensus(node, store)
+	node := setupTestNode(1)
+	rc := NewRaftConsensus(node)
 
 	if rc.currentTerm != 0 {
 		t.Errorf("Expected currentTerm to be 0, got %d", rc.currentTerm)

@@ -1,0 +1,7 @@
+{
+  "nodes": [
+    {"id": 1, "rpcAddr": "localhost:8001"},
+    {"id": 2, "rpcAddr": "localhost:8002"},
+    {"id": 3, "rpcAddr": "localhost:8003"}
+  ]
+}
