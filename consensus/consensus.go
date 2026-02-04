@@ -57,7 +57,7 @@ func NewRaftConsensus(node *types.Node) *RaftConsensus {
 
 		applyCh: make(chan ApplyMsg), // channel to apply committed log entries
 
-		electionTimer:  time.NewTimer(ElectionTimeoutMs * time.Millisecond),   // can be updated
+		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),             // randomized election timeout
 		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond), // heartbeat interval
 
 		node: node,
@@ -120,8 +120,8 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 		return fmt.Errorf("term %d is older than current term %d", term, rc.currentTerm)
 	}
 
-	// if leader alive
-	rc.electionTimer.Reset(150 * time.Millisecond)
+	// if leader alive - reset election timer with random value
+	rc.electionTimer.Reset(GetRandomElectionTimeout())
 
 	// if the term is higher, update current term and reset votedFor
 	if term > rc.currentTerm {
@@ -263,8 +263,8 @@ func (rc *RaftConsensus) Start() {
 				rc.node.Mu.Unlock()
 				rc.mu.Unlock()
 
-				// reset election timer after election timeout
-				rc.electionTimer.Reset(ElectionTimeoutMs * time.Millisecond)
+				// reset election timer after election timeout with random value
+				rc.electionTimer.Reset(GetRandomElectionTimeout())
 
 			case <-rc.heartbeatTimer.C:
 				// send AppendEntries (heartbeats) to followers if leader

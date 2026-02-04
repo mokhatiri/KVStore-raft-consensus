@@ -198,9 +198,12 @@ func handleSet(parts []string) {
 	key := parts[1]
 	value := strings.Join(parts[2:], " ")
 
+	// Get current term BEFORE acquiring node lock
+	term := raftConsensus.GetCurrentTerm()
+
 	// Add to log
 	entry := types.LogEntry{
-		Term:    raftConsensus.GetCurrentTerm(),
+		Term:    term,
 		Command: "SET",
 		Key:     key,
 		Value:   value,
@@ -234,9 +237,12 @@ func handleDelete(parts []string) {
 
 	key := parts[1]
 
+	// Get current term BEFORE acquiring node lock
+	term := raftConsensus.GetCurrentTerm()
+
 	// Add to log
 	entry := types.LogEntry{
-		Term:    raftConsensus.GetCurrentTerm(),
+		Term:    term,
 		Command: "DELETE",
 		Key:     key,
 		Value:   nil,
@@ -266,6 +272,10 @@ func handleAll() {
 }
 
 func handleStatus() {
+	// Get consensus state FIRST before acquiring node lock to avoid deadlock
+	currentTerm := raftConsensus.GetCurrentTerm()
+	votedFor := raftConsensus.GetVotedFor()
+
 	node.Mu.RLock()
 	defer node.Mu.RUnlock()
 
@@ -273,8 +283,8 @@ func handleStatus() {
 	fmt.Printf("Node ID:       %d\n", node.ID)
 	fmt.Printf("Address:       %s\n", node.Address)
 	fmt.Printf("Role:          %s\n", node.Role)
-	fmt.Printf("Current Term:  %d\n", raftConsensus.GetCurrentTerm())
-	fmt.Printf("Voted For:     %d\n", raftConsensus.GetVotedFor())
+	fmt.Printf("Current Term:  %d\n", currentTerm)
+	fmt.Printf("Voted For:     %d\n", votedFor)
 	fmt.Printf("Log Length:    %d\n", len(node.Log))
 	fmt.Printf("Commit Index:  %d\n", node.CommitIdx)
 	fmt.Printf("Peers:         %v\n", node.Peers)
