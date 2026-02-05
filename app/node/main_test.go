@@ -80,19 +80,19 @@ func TestMainIntegration(t *testing.T) {
 	// Test 3: Test RequestVote mechanism
 	t.Run("RequestVoteMechanism", func(t *testing.T) {
 		// Node 1 requests vote from Node 0
-		voteGranted := consensusEngines[0].RequestVote(1, 1) // term 1, candidate ID 1
+		voteGranted, _ := consensusEngines[0].RequestVote(1, 1, 0, 0) // term 1, candidate ID 1
 		if !voteGranted {
 			t.Error("Node 0 should grant vote for Node 1")
 		}
 
 		// Node 2 requests vote from Node 0 in same term
-		voteGranted = consensusEngines[0].RequestVote(1, 2)
+		voteGranted, _ = consensusEngines[0].RequestVote(1, 2, 0, 0)
 		if voteGranted {
 			t.Error("Node 0 should not grant second vote in same term")
 		}
 
 		// Node 1 requests vote from Node 0 with higher term
-		voteGranted = consensusEngines[0].RequestVote(2, 1)
+		voteGranted, _ = consensusEngines[0].RequestVote(2, 1, 0, 0)
 		if !voteGranted {
 			t.Error("Node 0 should grant vote with higher term")
 		}
@@ -159,7 +159,7 @@ func TestMainIntegration(t *testing.T) {
 		}
 
 		// Request votes (simulate election)
-		voteGranted0 := rc.RequestVote(1, 2) // higher term, node 1 votes for itself
+		voteGranted0, _ := rc.RequestVote(1, 2, 0, 0) // higher term, node 1 votes for itself
 		if !voteGranted0 {
 			t.Error("Node 1 should grant vote in higher term")
 		}
@@ -180,7 +180,7 @@ func TestMainIntegration(t *testing.T) {
 
 		votes := 0
 		for i := 0; i < 3; i++ {
-			if consensusEngines[i].RequestVote(candidateTerm, candidateID) {
+			if granted, _ := consensusEngines[i].RequestVote(candidateTerm, candidateID, 0, 0); granted {
 				votes++
 			}
 		}

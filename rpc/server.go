@@ -40,10 +40,10 @@ func NewRaftServer(consensus types.ConsensusModule) *RaftServer {
 }
 
 func (rs *RaftServer) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
-	VoteGranted := rs.consensus.RequestVote(args.Term, args.CandidateID)
+	voteGranted, term := rs.consensus.RequestVote(args.Term, args.CandidateID, args.LastLogIndex, args.LastLogTerm)
 
-	reply.Term = rs.consensus.GetCurrentTerm()
-	reply.VoteGranted = VoteGranted
+	reply.Term = term
+	reply.VoteGranted = voteGranted
 
 	return nil
 }

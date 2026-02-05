@@ -19,15 +19,15 @@ type MockConsensus struct {
 	lastAppendSucceeded bool
 }
 
-func (mc *MockConsensus) RequestVote(term int, candidateId int) bool {
+func (mc *MockConsensus) RequestVote(term int, candidateId int, lastLogIndex int, lastLogTerm int) (bool, int) {
 	mc.requestVoteCalled = true
 	if term > mc.currentTerm {
 		mc.currentTerm = term
 		mc.lastVoteGranted = true
-		return true
+		return true, term
 	}
 	mc.lastVoteGranted = false
-	return false
+	return false, mc.currentTerm
 }
 
 func (mc *MockConsensus) AppendEntries(term int, leaderId int, prevLogIndex int, prevLogTerm int, leaderCommit int, entries []types.LogEntry) error {
@@ -41,8 +41,20 @@ func (mc *MockConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 	return nil
 }
 
+func (mc *MockConsensus) Propose(command string) (index int, term int, isLeader bool) {
+	// Mock implementation
+	return 0, mc.currentTerm, false
+}
+
 func (mc *MockConsensus) GetCurrentTerm() int {
 	return mc.currentTerm
+}
+
+func (mc *MockConsensus) GetApplyCh() <-chan consensus.ApplyMsg {
+	// Mock implementation - return closed channel
+	ch := make(chan consensus.ApplyMsg)
+	close(ch)
+	return ch
 }
 
 func (mc *MockConsensus) Start() {

@@ -22,7 +22,7 @@ func TestRequestVoteHigherTerm(t *testing.T) {
 	rc := NewRaftConsensus(node)
 
 	// Candidate from term 2 requests vote
-	granted := rc.RequestVote(2, 2)
+	granted, _ := rc.RequestVote(2, 2, 0, 0)
 
 	if !granted {
 		t.Errorf("Expected vote to be granted for higher term, but it wasn't")
@@ -42,19 +42,19 @@ func TestRequestVoteSameTerm(t *testing.T) {
 	rc := NewRaftConsensus(node)
 
 	// First vote in term 1
-	granted1 := rc.RequestVote(1, 2)
+	granted1, _ := rc.RequestVote(1, 2, 0, 0)
 	if !granted1 {
 		t.Errorf("Expected first vote to be granted")
 	}
 
 	// Second vote in term 1 from same candidate
-	granted2 := rc.RequestVote(1, 2)
+	granted2, _ := rc.RequestVote(1, 2, 0, 0)
 	if !granted2 {
 		t.Errorf("Expected second vote from same candidate to be granted")
 	}
 
 	// Third vote in term 1 from different candidate
-	granted3 := rc.RequestVote(1, 3)
+	granted3, _ := rc.RequestVote(1, 3, 0, 0)
 	if granted3 {
 		t.Errorf("Expected vote for different candidate in same term to be denied")
 	}
@@ -68,7 +68,7 @@ func TestRequestVoteLowerTerm(t *testing.T) {
 	rc.currentTerm = 3
 
 	// Request vote with lower term
-	granted := rc.RequestVote(2, 2)
+	granted, _ := rc.RequestVote(2, 2, 0, 0)
 
 	if granted {
 		t.Errorf("Expected vote to be denied for lower term")
