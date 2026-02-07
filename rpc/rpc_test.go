@@ -50,9 +50,9 @@ func (mc *MockConsensus) GetCurrentTerm() int {
 	return mc.currentTerm
 }
 
-func (mc *MockConsensus) GetApplyCh() <-chan consensus.ApplyMsg {
+func (mc *MockConsensus) GetApplyCh() <-chan types.ApplyMsg {
 	// Mock implementation - return closed channel
-	ch := make(chan consensus.ApplyMsg)
+	ch := make(chan types.ApplyMsg)
 	close(ch)
 	return ch
 }

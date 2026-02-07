@@ -1,10 +1,11 @@
 package rpc
 
 import (
-	"distributed-kv/types"
 	"net"
 	"net/rpc"
 	"time"
+
+	"distributed-kv/types"
 )
 
 func SendRequestVote(address string, term int, candidateId int, lastLogIndex int, lastLogTerm int) (succ bool, new_term int, err error) {

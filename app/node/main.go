@@ -1,13 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
-	"strings"
 	"time"
 
 	"distributed-kv/consensus"
@@ -31,7 +30,6 @@ import (
 */
 
 var (
-	node          *types.Node
 	raftConsensus *consensus.RaftConsensus
 	store         *storage.Store
 )
@@ -42,10 +40,22 @@ func main() {
 	// start the Raft
 	start(id, address, peers)
 	// add interactive command line interface for user commands
-	startRPC()
+	startRPC(address)
 	// Give RPC server time to start before starting consensus
 	time.Sleep(500 * time.Millisecond)
-	log.Printf("RPC server started on %s", node.Address)
+	log.Printf("RPC server started on %s", address)
+
+	// Start pprof server for debugging goroutines/deadlocks
+	go func() {
+		log.Printf("[Node %d] pprof server started on http://localhost:6060/debug/pprof/", id)
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			log.Printf("[Node %d] pprof server error: %v", id, err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	// start apply consumer (applies committed entries to store)
+	startApplyConsumer()
 	// start CLI
 	startCLI()
 }
@@ -97,223 +107,21 @@ func parseArgs() (int, string, []string) {
 	return *idPtr, address, peers
 }
 
-func startRPC() {
+func startRPC(address string) {
 	// start the RPC server listening on the node's RPC address
 	// handle incomming RPC calls from peers for Raft consensus
-	rpc.StartServer(raftConsensus, node.Address)
+	rpc.StartServer(raftConsensus, address)
+}
+
+// startApplyConsumer consumes committed log entries and applies them to the state machine (store)
+func startApplyConsumer() {
+	raftConsensus.StartConsumption(store)
 }
 
 func start(id int, address string, peers []string) {
-	// create a new nod
-	node = types.NewNode(id, address, peers)
 	// create the key-value store
 	store = storage.NewStore()
-	// create Raft consensus module
-	raftConsensus = consensus.NewRaftConsensus(node)
-}
-
-func startCLI() {
-	// Start Raft consensus
-	raftConsensus.Start()
-	log.Printf("Node %d started. Role: %s", node.ID, node.Role)
-
-	reader := bufio.NewReader(os.Stdin)
-
-	for {
-		fmt.Printf("\n[Node %d - %s] > ", node.ID, node.Role)
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
-
-		if input == "" {
-			continue
-		}
-
-		parts := strings.Fields(input)
-		command := parts[0]
-
-		switch command {
-		case "get":
-			handleGet(parts)
-
-		case "set":
-			handleSet(parts)
-
-		case "delete":
-			handleDelete(parts)
-
-		case "all":
-			handleAll()
-
-		case "status":
-			handleStatus()
-
-		case "log":
-			handleLog()
-
-		case "help":
-			handleHelp()
-
-		case "exit":
-			fmt.Println("Exiting...")
-			os.Exit(0)
-
-		default:
-			fmt.Println("Unknown command. Type 'help' for available commands.")
-		}
-	}
-}
-
-func handleGet(parts []string) {
-	if len(parts) < 2 {
-		fmt.Println("Usage: get <key>")
-		return
-	}
-
-	key := parts[1]
-	value, exists := store.Get(key)
-	if !exists {
-		fmt.Printf("Key '%s' not found\n", key)
-		return
-	}
-
-	fmt.Printf("%s = %v\n", key, value)
-}
-
-func handleSet(parts []string) {
-	if len(parts) < 3 {
-		fmt.Println("Usage: set <key> <value>")
-		return
-	}
-
-	// Check if leader
-	node.Mu.RLock()
-	role := node.Role
-	node.Mu.RUnlock()
-
-	if role != "Leader" {
-		fmt.Printf("Error: Only leader can set values. This node is a %s\n", role)
-		return
-	}
-
-	key := parts[1]
-	value := strings.Join(parts[2:], " ")
-
-	// Get current term BEFORE acquiring node lock
-	term := raftConsensus.GetCurrentTerm()
-
-	// Add to log
-	entry := types.LogEntry{
-		Term:    term,
-		Command: "SET",
-		Key:     key,
-		Value:   value,
-	}
-
-	node.Mu.Lock()
-	node.Log = append(node.Log, entry)
-	node.Mu.Unlock()
-
-	// Apply to store
-	store.Set(key, value)
-
-	fmt.Printf("✓ Set %s = %s (log index: %d)\n", key, value, len(node.Log))
-}
-
-func handleDelete(parts []string) {
-	if len(parts) < 2 {
-		fmt.Println("Usage: delete <key>")
-		return
-	}
-
-	// Check if leader
-	node.Mu.RLock()
-	role := node.Role
-	node.Mu.RUnlock()
-
-	if role != "Leader" {
-		fmt.Printf("Error: Only leader can delete values. This node is a %s\n", role)
-		return
-	}
-
-	key := parts[1]
-
-	// Get current term BEFORE acquiring node lock
-	term := raftConsensus.GetCurrentTerm()
-
-	// Add to log
-	entry := types.LogEntry{
-		Term:    term,
-		Command: "DELETE",
-		Key:     key,
-		Value:   nil,
-	}
-
-	node.Mu.Lock()
-	node.Log = append(node.Log, entry)
-	node.Mu.Unlock()
-
-	// Apply to store
-	store.Delete(key)
-
-	fmt.Printf("✓ Deleted key '%s' (log index: %d)\n", key, len(node.Log))
-}
-
-func handleAll() {
-	data := store.GetAll()
-	if len(data) == 0 {
-		fmt.Println("Store is empty")
-		return
-	}
-
-	fmt.Println("Key-Value Store:")
-	for key, value := range data {
-		fmt.Printf("  %s = %v\n", key, value)
-	}
-}
-
-func handleStatus() {
-	// Get consensus state FIRST before acquiring node lock to avoid deadlock
-	currentTerm := raftConsensus.GetCurrentTerm()
-	votedFor := raftConsensus.GetVotedFor()
-
-	node.Mu.RLock()
-	defer node.Mu.RUnlock()
-
-	fmt.Println("\n--- Node Status ---")
-	fmt.Printf("Node ID:       %d\n", node.ID)
-	fmt.Printf("Address:       %s\n", node.Address)
-	fmt.Printf("Role:          %s\n", node.Role)
-	fmt.Printf("Current Term:  %d\n", currentTerm)
-	fmt.Printf("Voted For:     %d\n", votedFor)
-	fmt.Printf("Log Length:    %d\n", len(node.Log))
-	fmt.Printf("Commit Index:  %d\n", node.CommitIdx)
-	fmt.Printf("Peers:         %v\n", node.Peers)
-}
-
-func handleLog() {
-	node.Mu.RLock()
-	defer node.Mu.RUnlock()
-
-	if len(node.Log) == 0 {
-		fmt.Println("Log is empty")
-		return
-	}
-
-	fmt.Println("\n--- Replication Log ---")
-	for i, entry := range node.Log {
-		fmt.Printf("[%d] Term: %d, Command: %s, Key: %s, Value: %v\n",
-			i+1, entry.Term, entry.Command, entry.Key, entry.Value)
-	}
-}
-
-func handleHelp() {
-	fmt.Println("\n--- Available Commands ---")
-	fmt.Println("  get <key>           - Get value from THIS node's store")
-	fmt.Println("  set <key> <value>   - Set value (must be leader)")
-	fmt.Println("  delete <key>        - Delete key (must be leader)")
-	fmt.Println("  all                 - Show all data on THIS node")
-	fmt.Println("  status              - Show node status (role, term, log length)")
-	fmt.Println("  log                 - Show the replication log")
-	fmt.Println("  help                - Show this help message")
-	fmt.Println("  exit                - Exit the program")
+	// create a new node and Raft consensus module
+	newNode := types.NewNode(id, address, peers)
+	raftConsensus = consensus.NewRaftConsensus(newNode)
 }

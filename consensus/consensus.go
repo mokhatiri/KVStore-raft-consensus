@@ -3,18 +3,16 @@ package consensus
 
 import (
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"distributed-kv/rpc"
+	"distributed-kv/storage"
 	"distributed-kv/types"
 )
 
-type ApplyMsg struct {
-	CommandValid bool
-	Command      types.LogEntry
-	CommandIndex int
-}
 type RaftConsensus struct {
 	mu          sync.Mutex
 	currentTerm int
@@ -24,7 +22,7 @@ type RaftConsensus struct {
 	nextIndex  []int // For leaders, next log entry to send to each follower
 	matchIndex []int // For leaders, index of highest log entry known to be replicated on each follower
 
-	applyCh chan ApplyMsg
+	applyCh chan types.ApplyMsg
 
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
@@ -32,6 +30,51 @@ type RaftConsensus struct {
 	node *types.Node
 	// the node has:
 	// ID, Address, Peers, Role, Log, CommitIdx
+}
+
+func (rc *RaftConsensus) PrintStatus() {
+	// Read values without locking the consensus module to prevent hangs
+	fmt.Println("\n--- node Status ---")
+
+	rc.node.Mu.RLock()
+	id := rc.node.ID
+	address := rc.node.Address
+	role := rc.node.Role
+	logLen := len(rc.node.Log)
+	commitIdx := rc.node.CommitIdx
+	peers := rc.node.Peers
+	rc.node.Mu.RUnlock()
+
+	fmt.Printf("node ID:       %d\n", id)
+	fmt.Printf("Address:       %s\n", address)
+	fmt.Printf("Role:          %s\n", role)
+	fmt.Printf("Current Term:  %d\n", rc.currentTerm)
+	fmt.Printf("Voted For:     %d\n", rc.votedFor)
+	fmt.Printf("Log Length:    %d\n", logLen)
+	fmt.Printf("Commit Index:  %d\n", commitIdx)
+	fmt.Printf("Peers:         %v\n", peers)
+}
+
+func (rc *RaftConsensus) PrintLog() {
+	rc.node.Mu.RLock()
+	defer rc.node.Mu.RUnlock()
+
+	if len(rc.node.Log) == 0 {
+		fmt.Println("Log is empty")
+		return
+	}
+
+	fmt.Println("\n--- Replication Log ---")
+	for i, entry := range rc.node.Log {
+		fmt.Printf("[%d] Term: %d, Command: %s, Key: %s, Value: %v\n",
+			i+1, entry.Term, entry.Command, entry.Key, entry.Value)
+	}
+}
+
+func (rc *RaftConsensus) GetNodeInfo() (int, string) {
+	rc.node.Mu.RLock()
+	defer rc.node.Mu.RUnlock()
+	return rc.node.ID, rc.node.Role
 }
 
 func (rc *RaftConsensus) GetCurrentTerm() int {
@@ -47,7 +90,7 @@ func (rc *RaftConsensus) GetVotedFor() int {
 }
 
 // GetApplyCh returns the channel for applied log entries
-func (rc *RaftConsensus) GetApplyCh() <-chan ApplyMsg {
+func (rc *RaftConsensus) GetApplyCh() <-chan types.ApplyMsg {
 	return rc.applyCh
 }
 
@@ -84,7 +127,7 @@ func NewRaftConsensus(node *types.Node) *RaftConsensus {
 		nextIndex:  make([]int, len(node.Peers)),
 		matchIndex: make([]int, len(node.Peers)),
 
-		applyCh: make(chan ApplyMsg), // channel to apply committed log entries
+		applyCh: make(chan types.ApplyMsg), // channel to apply committed log entries
 
 		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),             // randomized election timeout
 		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond), // heartbeat interval
@@ -206,9 +249,15 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 	// Verify log consistency: check if we have the prevLogIndex entry with prevLogTerm
 	rc.node.Mu.RLock()
 	logLen := len(rc.node.Log)
+	var logValid bool = true
+	if prevLogIndex > 0 && logLen >= prevLogIndex {
+		logValid = rc.node.Log[prevLogIndex-1].Term == prevLogTerm
+	} else if prevLogIndex > 0 {
+		logValid = false
+	}
 	rc.node.Mu.RUnlock()
 
-	if prevLogIndex > 0 && (logLen < prevLogIndex || (logLen >= prevLogIndex && rc.node.Log[prevLogIndex-1].Term != prevLogTerm)) {
+	if prevLogIndex > 0 && !logValid {
 		// Log doesn't match at prevLogIndex, reject the append
 		return fmt.Errorf("log mismatch at index %d, expected term %d", prevLogIndex, prevLogTerm)
 	}
@@ -228,14 +277,14 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 	// Update commitIndex if leader's commit is higher
 	// commitIndex = min(leaderCommit, index of last new entry)
 	if leaderCommit > rc.node.CommitIdx {
-		rc.node.Mu.RLock()
+		rc.node.Mu.Lock()
 		lastNewIdx := len(rc.node.Log)
-		rc.node.Mu.RUnlock()
 		if leaderCommit < lastNewIdx {
 			rc.node.CommitIdx = leaderCommit
 		} else {
 			rc.node.CommitIdx = lastNewIdx
 		}
+		rc.node.Mu.Unlock()
 	}
 
 	return nil
@@ -268,7 +317,8 @@ and message handling.
 
 it's a go routine because it runs concurrently with other parts of the system.
 */
-func (rc *RaftConsensus) Start() {
+func (rc *RaftConsensus) Start(store *storage.Store) {
+	// Start goroutine to handle state transitions and message handling
 	go func() {
 		for {
 			select {
@@ -309,8 +359,8 @@ func (rc *RaftConsensus) Start() {
 						}
 					}
 					// if majority, become leader (majority = more than half of total nodes including self)
-					totalNodes := len(rc.node.Peers) + 1
-					if votesGranted > totalNodes/2 {
+					totalnodes := len(rc.node.Peers) + 1
+					if votesGranted > totalnodes/2 {
 						rc.node.Role = "Leader"
 						// Initialize nextIndex and matchIndex for all peers
 						logLen := len(rc.node.Log)
@@ -351,30 +401,36 @@ func (rc *RaftConsensus) Start() {
 				if isLeader {
 					for i, peerAddr := range rc.node.Peers {
 						go func(followerAddr string, followerIdx int) {
+							// Snapshot state inside locks before RPC
 							rc.mu.Lock()
 							nextIdx := rc.nextIndex[followerIdx]
+							currentTerm := rc.currentTerm
 							rc.mu.Unlock()
 
 							rc.node.Mu.RLock()
+							leaderId := rc.node.ID
+							commitIdx := rc.node.CommitIdx
 							prevLogIdx := nextIdx - 1
 							prevLogTerm := 0
 							if prevLogIdx > 0 && prevLogIdx <= len(rc.node.Log) {
 								prevLogTerm = rc.node.Log[prevLogIdx-1].Term
 							}
 							var entries []types.LogEntry
-							if nextIdx > 0 && nextIdx <= len(rc.node.Log)+1 {
-								entries = rc.node.Log[nextIdx-1:]
+							if nextIdx > 0 && nextIdx <= len(rc.node.Log) {
+								original := rc.node.Log[nextIdx-1:]
+								entries = make([]types.LogEntry, len(original))
+								copy(entries, original)
 							}
 							rc.node.Mu.RUnlock()
 
-							// call rpc to send AppendEntries
-							success, newTerm, err := rpc.SendAppendEntries(followerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries)
+							// RPC call with cached values
+							success, newTerm, err := rpc.SendAppendEntries(followerAddr, currentTerm, leaderId, prevLogIdx, prevLogTerm, commitIdx, entries)
 
 							if err != nil {
 								return
 							}
 
-							if newTerm > rc.currentTerm {
+							if newTerm > currentTerm {
 								// step down if term is higher
 								rc.mu.Lock()
 								rc.currentTerm = newTerm
@@ -388,12 +444,16 @@ func (rc *RaftConsensus) Start() {
 
 							// update the matchIndex and nextIndex for the follower
 							if success {
+								rc.node.Mu.RLock()
+								logLen := len(rc.node.Log)
+								rc.node.Mu.RUnlock()
+
 								rc.mu.Lock()
-								rc.matchIndex[followerIdx] = len(rc.node.Log)
-								rc.nextIndex[followerIdx] = len(rc.node.Log) + 1
+								rc.matchIndex[followerIdx] = logLen
+								rc.nextIndex[followerIdx] = logLen + 1
 								rc.mu.Unlock()
 
-								// calculate commit index based on matchIndex
+								// calculate commit index based on matchIndex (outside lock)
 								rc.calculateCommitIndex()
 							} else {
 								// replication failed, decrement nextIndex and retry
@@ -418,31 +478,100 @@ func (rc *RaftConsensus) Start() {
 			rc.mu.Lock()
 			rc.node.Mu.RLock()
 			commitIdx := rc.node.CommitIdx
-			lastApplied := rc.lastApplied
+			logLen := len(rc.node.Log)
 			rc.node.Mu.RUnlock()
-			rc.mu.Unlock()
+			lastApplied := rc.lastApplied
 
-			// apply all the committed but not yet applied entries
-			if lastApplied < commitIdx {
-				rc.mu.Lock()
+			// Check if we have entries to apply
+			if lastApplied < commitIdx && lastApplied < logLen {
 				rc.lastApplied += 1
-				rc.node.Mu.RLock()
-				entry := rc.node.Log[rc.lastApplied-1]
-				rc.node.Mu.RUnlock()
+				idx := rc.lastApplied
 				rc.mu.Unlock()
 
-				// Send to applychannel
-				rc.applyCh <- ApplyMsg{
-					CommandValid: true,
-					Command:      entry,
-					CommandIndex: rc.lastApplied,
+				// Fetch the entry to apply while holding node lock
+				rc.node.Mu.RLock()
+				if idx > 0 && idx <= logLen {
+					entry := rc.node.Log[idx-1]
+					rc.node.Mu.RUnlock()
+
+					// Send to applychannel (may block)
+					rc.applyCh <- types.ApplyMsg{
+						CommandValid: true,
+						Command:      entry,
+						CommandIndex: idx,
+					}
+				} else {
+					rc.node.Mu.RUnlock()
 				}
 			} else {
+				rc.mu.Unlock()
 				time.Sleep(10 * time.Millisecond) // avoid busy waiting
 			}
 		}
 	}()
 
+	go rc.StartConsumption(store)
+}
+
+/*
+	Start consumption of applied log entries.
+
+- this is where the state machine applies the committed log entries to the actual key-value store.
+- it listens on the applyCh for new committed entries, and when it receives one, it executes the command on the store.
+
+---
+StartApplyConsumer runs a goroutine that listens for committed log entries on the applyCh channel.
+When it receives a new entry, it parses the command and applies it to the state machine (key-value store).
+*/
+func (rc *RaftConsensus) StartConsumption(store *storage.Store) {
+	rc.node.Mu.RLock()
+	id := rc.node.ID
+	rc.node.Mu.RUnlock()
+
+	for applyMsg := range rc.applyCh {
+		if !applyMsg.CommandValid {
+			continue
+		}
+
+		entry := applyMsg.Command
+		commandStr := entry.Command
+
+		// for the cli visualisation!
+		log.Printf("\n[Node %d] Received committed entry: Term %d, Command: %s (index: %d)", id, entry.Term, commandStr, applyMsg.CommandIndex)
+
+		// Parse the command string
+		parts := strings.SplitN(commandStr, ":", 3)
+		if len(parts) < 1 {
+			log.Printf("[Node %d] Invalid command format: %s", id, commandStr)
+			continue
+		}
+
+		commandType := parts[0]
+		// Execute the command on the state machine
+		switch commandType {
+		case "SET":
+			if len(parts) < 3 {
+				log.Printf("[Node %d] Invalid SET command format: %s", id, commandStr)
+				continue
+			}
+			key := parts[1]
+			value := parts[2]
+			store.Set(key, value)
+			log.Printf("[Node %d] Applied SET %s = %s (index: %d)", id, key, value, applyMsg.CommandIndex)
+
+		case "DELETE":
+			if len(parts) < 2 {
+				log.Printf("[Node %d] Invalid DELETE command format: %s", id, commandStr)
+				continue
+			}
+			key := parts[1]
+			store.Delete(key)
+			log.Printf("[Node %d] Applied DELETE %s (index: %d)", id, key, applyMsg.CommandIndex)
+
+		default:
+			log.Printf("[Node %d] Unknown command type: %s", id, commandType)
+		}
+	}
 }
 
 /*
@@ -503,4 +632,5 @@ func (rc *RaftConsensus) calculateCommitIndex() {
 		}
 	}
 	rc.node.Mu.RUnlock()
+
 }

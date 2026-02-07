@@ -1,7 +1,6 @@
 package types
 
 import (
-	"strconv"
 	"sync"
 )
 
@@ -25,16 +24,4 @@ func NewNode(id int, address string, peers []string) *Node {
 		CommitIdx: 0,
 		Mu:        sync.RWMutex{},
 	}
-}
-
-func (n *Node) PrintInfo() string {
-	n.Mu.RLock()
-	defer n.Mu.RUnlock()
-	info := "Node ID: " + strconv.Itoa(n.ID) + "\n"
-	info += "Address: " + n.Address + "\n"
-	info += "Role: " + n.Role + "\n"
-	info += "Peers: " + strconv.Itoa(len(n.Peers)) + "\n"
-	info += "Log Length: " + strconv.Itoa(len(n.Log)) + "\n"
-	info += "Commit Index: " + strconv.Itoa(n.CommitIdx) + "\n"
-	return info
 }
