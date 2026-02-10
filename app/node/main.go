@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -37,25 +38,10 @@ var (
 // Main entry point for the distributed key-value store node.
 func main() {
 	id, address, peers := parseArgs()
+
 	// start the Raft
 	start(id, address, peers)
-	// add interactive command line interface for user commands
-	startRPC(address)
-	// Give RPC server time to start before starting consensus
-	time.Sleep(500 * time.Millisecond)
-	log.Printf("RPC server started on %s", address)
 
-	// Start pprof server for debugging goroutines/deadlocks
-	go func() {
-		log.Printf("[Node %d] pprof server started on http://localhost:6060/debug/pprof/", id)
-		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
-			log.Printf("[Node %d] pprof server error: %v", id, err)
-		}
-	}()
-	time.Sleep(100 * time.Millisecond)
-
-	// start apply consumer (applies committed entries to store)
-	startApplyConsumer()
 	// start CLI
 	startCLI()
 }
@@ -107,21 +93,33 @@ func parseArgs() (int, string, []string) {
 	return *idPtr, address, peers
 }
 
-func startRPC(address string) {
-	// start the RPC server listening on the node's RPC address
-	// handle incomming RPC calls from peers for Raft consensus
-	rpc.StartServer(raftConsensus, address)
-}
-
-// startApplyConsumer consumes committed log entries and applies them to the state machine (store)
-func startApplyConsumer() {
-	raftConsensus.StartConsumption(store)
-}
-
 func start(id int, address string, peers []string) {
 	// create the key-value store
 	store = storage.NewStore()
+
 	// create a new node and Raft consensus module
 	newNode := types.NewNode(id, address, peers)
 	raftConsensus = consensus.NewRaftConsensus(newNode)
+
+	// start the RPC server
+	rpc.StartServer(raftConsensus, address)
+
+	// Give RPC server time to start before starting consensus
+	time.Sleep(500 * time.Millisecond)
+	log.Printf("RPC server started on %s", address)
+	log.Println("-----------------------------------------------")
+
+	// Start pprof server for debugging goroutines/deadlocks
+	pport := 6060 + id // Node 1→6061, Node 2→6062, Node 3→6063
+	go func() {
+		log.Printf("[Node %d] pprof server started on http://localhost:%d/debug/pprof/", id, pport)
+		if err := http.ListenAndServe(fmt.Sprintf("localhost:%d", pport), nil); err != nil {
+			log.Printf("[Node %d] pprof server error: %v", id, err)
+		}
+	}()
+	log.Printf("-----------------------------------------------")
+	time.Sleep(100 * time.Millisecond)
+
+	// start the Raft consensus module
+	raftConsensus.Start(store)
 }

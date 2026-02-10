@@ -45,3 +45,9 @@ func (s *Store) GetAll() map[string]any {
 	}
 	return copiedData
 }
+
+func (s *Store) ClearAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = make(map[string]any)
+}

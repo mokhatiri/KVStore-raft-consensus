@@ -10,7 +10,6 @@ import (
 
 func startCLI() {
 	// Start Raft consensus
-	raftConsensus.Start(store)
 	nodeId, nodeRole := raftConsensus.GetNodeInfo()
 	log.Printf("Node %d started. Role: %s", nodeId, nodeRole)
 
@@ -48,6 +47,9 @@ func startCLI() {
 		case "log":
 			handleLog()
 
+		case "clean":
+			handleClean()
+
 		case "help":
 			handleHelp()
 
@@ -83,6 +85,13 @@ func handleSet(parts []string) {
 		return
 	}
 
+	// Check if node is leader first
+	_, role := raftConsensus.GetNodeInfo()
+	if role != "Leader" {
+		fmt.Println("Error: Not the leader")
+		return
+	}
+
 	key := parts[1]
 	value := strings.Join(parts[2:], " ")
 
@@ -90,12 +99,7 @@ func handleSet(parts []string) {
 	command := fmt.Sprintf("SET:%s:%s", key, value)
 
 	// Propose the command to Raft consensus
-	index, term, isLeader := raftConsensus.Propose(command)
-	if !isLeader {
-		fmt.Println("Error: Not the leader")
-		return
-	}
-
+	index, term, _ := raftConsensus.Propose(command)
 	fmt.Printf("✓ Proposed SET %s = %s (index: %d, term: %d) - waiting for commitment...\n", key, value, index, term)
 }
 
@@ -105,18 +109,20 @@ func handleDelete(parts []string) {
 		return
 	}
 
+	// Check if node is leader first
+	_, role := raftConsensus.GetNodeInfo()
+	if role != "Leader" {
+		fmt.Println("Error: Not the leader")
+		return
+	}
+
 	key := parts[1]
 
 	// Format command as "DELETE:key"
 	command := fmt.Sprintf("DELETE:%s", key)
 
 	// Propose the command to Raft consensus
-	index, term, isLeader := raftConsensus.Propose(command)
-	if !isLeader {
-		fmt.Println("Error: Not the leader")
-		return
-	}
-
+	index, term, _ := raftConsensus.Propose(command)
 	fmt.Printf("✓ Proposed DELETE %s (index: %d, term: %d) - waiting for commitment...\n", key, index, term)
 }
 
@@ -141,11 +147,36 @@ func handleLog() {
 	raftConsensus.PrintLog()
 }
 
+func handleClean() {
+	// Check if node is leader first
+	_, role := raftConsensus.GetNodeInfo()
+	if role != "Leader" {
+		fmt.Println("Error: Not the leader")
+		return
+	}
+
+	// wait for confirmation before proposing to avoid multiple CLEAN commands being proposed at the same time
+	fmt.Print("Are you sure you want to CLEAN all data? This action cannot be undone. (yes/no): ")
+	reader := bufio.NewReader(os.Stdin)
+	confirmation, _ := reader.ReadString('\n')
+	confirmation = strings.TrimSpace(strings.ToLower(confirmation))
+
+	if confirmation != "yes" {
+		fmt.Println("CLEAN command aborted")
+		return
+	}
+
+	// Propose the command to Raft consensus
+	index, term, _ := raftConsensus.Propose("CLEAN")
+	fmt.Printf("✓ Proposed CLEAN all data (index: %d, term: %d) - waiting for commitment...\n", index, term)
+}
+
 func handleHelp() {
 	fmt.Println("\n--- Available Commands ---")
 	fmt.Println("  get <key>           - Get value from THIS node's store")
 	fmt.Println("  set <key> <value>   - Set value (must be leader)")
 	fmt.Println("  delete <key>        - Delete key (must be leader)")
+	fmt.Println("  clean               - Clean all data (must be leader)")
 	fmt.Println("  all                 - Show all data on THIS node")
 	fmt.Println("  status              - Show node status (role, term, log length)")
 	fmt.Println("  log                 - Show the replication log")

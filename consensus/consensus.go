@@ -27,10 +27,45 @@ type RaftConsensus struct {
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
 
-	node *types.Node
+	node      *types.Node
+	persister *types.Persister
 	// the node has:
 	// ID, Address, Peers, Role, Log, CommitIdx
 }
+
+func NewRaftConsensus(node *types.Node) *RaftConsensus {
+	persister := types.NewPersister(node.ID, ".")
+
+	// Load persisted state if available
+	term, votedFor, logEntries, err := persister.LoadState()
+	if err != nil {
+		log.Printf("Error reading persisted state: %v", err)
+	}
+
+	// put the log in place
+	node.Mu.Lock()
+	node.Log = logEntries
+	node.Mu.Unlock()
+
+	return &RaftConsensus{
+		currentTerm: term,
+		votedFor:    votedFor,
+		lastApplied: 0,
+
+		nextIndex:  make([]int, len(node.Peers)),
+		matchIndex: make([]int, len(node.Peers)),
+
+		applyCh: make(chan types.ApplyMsg), // channel to apply committed log entries
+
+		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),             // randomized election timeout
+		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond), // heartbeat interval
+
+		node:      node,
+		persister: persister,
+	}
+}
+
+/* - getters, prints - */
 
 func (rc *RaftConsensus) PrintStatus() {
 	// Read values without locking the consensus module to prevent hangs
@@ -89,13 +124,22 @@ func (rc *RaftConsensus) GetVotedFor() int {
 	return rc.votedFor
 }
 
-// GetApplyCh returns the channel for applied log entries
-func (rc *RaftConsensus) GetApplyCh() <-chan types.ApplyMsg {
-	return rc.applyCh
-}
+/* ------------------- */
 
-// Propose submits a new command to the Raft log (only works if this node is the leader)
-// Returns the index at which the command will appear if committed, the current term, and whether this node is the leader
+/*
+	Propose : allows clients to propose new commands to be replicated.
+
+- only the leader can accept proposals from clients.
+- when a client proposes a command, the leader appends it to its log and initiates
+replication to followers.
+- the leader will return the index of the log entry, the current term,
+and whether it is the leader.
+- if the node is not the leader, it will reject the proposal and return false.
+---
+Propose allows clients to propose new commands to be replicated across the cluster.
+Only the leader can accept proposals, and it will append the command to its log
+and initiate replication to followers.
+*/
 func (rc *RaftConsensus) Propose(command string) (index int, term int, isLeader bool) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -112,28 +156,22 @@ func (rc *RaftConsensus) Propose(command string) (index int, term int, isLeader 
 		Term:    rc.currentTerm,
 		Command: command,
 	}
+
+	parts := strings.SplitN(command, ":", 3)
+	if len(parts) >= 2 {
+		entry.Key = parts[1]
+	}
+	if len(parts) >= 3 {
+		entry.Value = parts[2]
+	}
+
 	rc.node.Log = append(rc.node.Log, entry)
+	// persister
+	rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+
 	index = len(rc.node.Log)
 
 	return index, rc.currentTerm, true
-}
-
-func NewRaftConsensus(node *types.Node) *RaftConsensus {
-	return &RaftConsensus{
-		currentTerm: 0,
-		votedFor:    -1,
-		lastApplied: 0,
-
-		nextIndex:  make([]int, len(node.Peers)),
-		matchIndex: make([]int, len(node.Peers)),
-
-		applyCh: make(chan types.ApplyMsg), // channel to apply committed log entries
-
-		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),             // randomized election timeout
-		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond), // heartbeat interval
-
-		node: node,
-	}
 }
 
 /*
@@ -152,7 +190,8 @@ and votes accordingly.
 
 voting is base on three conditions:
 - Term Check: The candidate's term is greater than or equal to the voter's current term.
-- First-Come-First-Served: The voter has not already voted for another candidate in the same term (i.e., votedFor is null or candidateId).
+- First-Come-First-Served: The voter has not already voted for another candidate in the
+same term (i.e., votedFor is null or candidateId).
 - Log Completeness: The candidate's log is at least as up-to-date as the voter's log.
 */
 func (rc *RaftConsensus) RequestVote(term int, candidateId int, lastLogIndex int, lastLogTerm int) (bool, int) {
@@ -163,9 +202,14 @@ func (rc *RaftConsensus) RequestVote(term int, candidateId int, lastLogIndex int
 	if term > rc.currentTerm {
 		rc.currentTerm = term
 		rc.votedFor = -1
-		// Step down to follower if we were leader/candidate
+
 		rc.node.Mu.Lock()
+		// persist
+		rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+
+		// Step down to follower if we were leader/candidate
 		rc.node.Role = "Follower"
+
 		rc.node.Mu.Unlock()
 	}
 
@@ -198,6 +242,8 @@ func (rc *RaftConsensus) RequestVote(term int, candidateId int, lastLogIndex int
 
 	// All conditions passed - grant vote
 	rc.votedFor = candidateId
+	// persist
+	rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
 	// Reset election timer when granting vote (prevents unnecessary elections)
 	rc.electionTimer.Reset(GetRandomElectionTimeout())
 
@@ -235,15 +281,18 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 	if term > rc.currentTerm {
 		rc.currentTerm = term // update current term
 		rc.votedFor = -1      // reset votedFor
+
+		// save persister
+		rc.node.Mu.RLock()
+		rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+		rc.node.Mu.RUnlock()
 	}
 	// if it's the same term, do nothing
 	// because the node is already in sync with the leader
 
 	// Step down if we're a candidate and receive AppendEntries from a valid leader
 	rc.node.Mu.Lock()
-	if rc.node.Role != "Follower" {
-		rc.node.Role = "Follower"
-	}
+	rc.node.Role = "Follower"
 	rc.node.Mu.Unlock()
 
 	// Verify log consistency: check if we have the prevLogIndex entry with prevLogTerm
@@ -251,7 +300,7 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 	logLen := len(rc.node.Log)
 	var logValid bool = true
 	if prevLogIndex > 0 && logLen >= prevLogIndex {
-		logValid = rc.node.Log[prevLogIndex-1].Term == prevLogTerm
+		logValid = (rc.node.Log[prevLogIndex-1].Term == prevLogTerm)
 	} else if prevLogIndex > 0 {
 		logValid = false
 	}
@@ -271,6 +320,7 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 			rc.node.Log = rc.node.Log[:prevLogIndex]
 		}
 		rc.node.Log = append(rc.node.Log, entries...) // append new entries to the log
+		rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
 		rc.node.Mu.Unlock()
 	}
 
@@ -344,22 +394,40 @@ func (rc *RaftConsensus) Start(store *storage.Store) {
 							}
 							granted, _, err := rpc.SendRequestVote(addr, rc.currentTerm, rc.node.ID, lastLogIdx, lastLogTerm)
 							if err == nil {
-								votesCh <- granted
-							} else {
-								votesCh <- false
+								votesCh <- granted // true or false
 							}
+							// If error (node offline), don't send anything - ignore it
 						}(peerAddr)
 					}
 
 					votesGranted := 1 // count self-vote
-					for range rc.node.Peers {
-						granted := <-votesCh
-						if granted {
-							votesGranted += 1
+					responseCount := 0
+					peerCount := len(rc.node.Peers)
+					totalnodes := peerCount + 1
+
+					// Collect votes with timeout - stop early if we get majority
+					voteTimeout := time.NewTimer(100 * time.Millisecond)
+
+					for responseCount < peerCount {
+						select {
+						case granted := <-votesCh:
+							responseCount++
+							if granted {
+								votesGranted++
+							}
+							// Check if we have majority - elect immediately if so
+							if votesGranted > totalnodes/2 {
+								responseCount = peerCount // break out of loop
+							}
+						case <-voteTimeout.C:
+							// Timeout waiting for responses from offline nodes
+							responseCount = peerCount // break out of loop
 						}
 					}
-					// if majority, become leader (majority = more than half of total nodes including self)
-					totalnodes := len(rc.node.Peers) + 1
+
+					voteTimeout.Stop() // Stop the timer after vote collection
+
+					// if majority, become leader
 					if votesGranted > totalnodes/2 {
 						rc.node.Role = "Leader"
 						// Initialize nextIndex and matchIndex for all peers
@@ -516,12 +584,16 @@ func (rc *RaftConsensus) Start(store *storage.Store) {
 /*
 	Start consumption of applied log entries.
 
-- this is where the state machine applies the committed log entries to the actual key-value store.
-- it listens on the applyCh for new committed entries, and when it receives one, it executes the command on the store.
+- this is where the state machine applies the committed log entries
+to the actual key-value store.
+- it listens on the applyCh for new committed entries, and when it receives one,
+it executes the command on the store.
 
 ---
-StartApplyConsumer runs a goroutine that listens for committed log entries on the applyCh channel.
-When it receives a new entry, it parses the command and applies it to the state machine (key-value store).
+StartApplyConsumer runs a goroutine that listens for committed log entries
+on the applyCh channel.
+When it receives a new entry, it parses the command and applies it to
+the state machine (key-value store).
 */
 func (rc *RaftConsensus) StartConsumption(store *storage.Store) {
 	rc.node.Mu.RLock()
@@ -567,6 +639,12 @@ func (rc *RaftConsensus) StartConsumption(store *storage.Store) {
 			key := parts[1]
 			store.Delete(key)
 			log.Printf("[Node %d] Applied DELETE %s (index: %d)", id, key, applyMsg.CommandIndex)
+
+		case "CLEAN":
+			rc.persister.ClearState()
+			store.ClearAll()
+			rc.node.Log = []types.LogEntry{} // clear in-memory log as well
+			log.Printf("[Node %d] Applied CLEAN all data (index: %d)", id, applyMsg.CommandIndex)
 
 		default:
 			log.Printf("[Node %d] Unknown command type: %s", id, commandType)
