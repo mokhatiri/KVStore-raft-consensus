@@ -27,8 +27,9 @@ type RaftConsensus struct {
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
 
-	node      *types.Node
-	persister *types.Persister
+	node       *types.Node
+	persister  *types.Persister
+	rpcEventCh chan types.RPCEvent
 	// the node has:
 	// ID, Address, Peers, Role, Log, CommitIdx
 }
@@ -60,8 +61,9 @@ func NewRaftConsensus(node *types.Node) *RaftConsensus {
 		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),             // randomized election timeout
 		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond), // heartbeat interval
 
-		node:      node,
-		persister: persister,
+		node:       node,
+		persister:  persister,
+		rpcEventCh: make(chan types.RPCEvent, 100), // channel to emit RPC events for monitoring
 	}
 }
 
@@ -106,10 +108,20 @@ func (rc *RaftConsensus) PrintLog() {
 	}
 }
 
-func (rc *RaftConsensus) GetNodeInfo() (int, string) {
+func (rc *RaftConsensus) GetRPCEventsCh() <-chan types.RPCEvent {
+	return rc.rpcEventCh
+}
+
+func (rc *RaftConsensus) GetNodeStatus() (int, string, int, int) {
 	rc.node.Mu.RLock()
 	defer rc.node.Mu.RUnlock()
-	return rc.node.ID, rc.node.Role
+	return rc.node.ID, rc.node.Role, rc.node.CommitIdx, len(rc.node.Log)
+}
+
+func (rc *RaftConsensus) GetRole() string {
+	rc.node.Mu.RLock()
+	defer rc.node.Mu.RUnlock()
+	return rc.node.Role
 }
 
 func (rc *RaftConsensus) GetCurrentTerm() int {
@@ -122,6 +134,12 @@ func (rc *RaftConsensus) GetVotedFor() int {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	return rc.votedFor
+}
+
+func (rc *RaftConsensus) GetNodeID() int {
+	rc.node.Mu.RLock()
+	defer rc.node.Mu.RUnlock()
+	return rc.node.ID
 }
 
 /* ------------------- */
@@ -392,7 +410,7 @@ func (rc *RaftConsensus) Start(store *storage.Store) {
 							if lastLogIdx > 0 {
 								lastLogTerm = rc.node.Log[lastLogIdx-1].Term
 							}
-							granted, _, err := rpc.SendRequestVote(addr, rc.currentTerm, rc.node.ID, lastLogIdx, lastLogTerm)
+							granted, _, err := rpc.SendRequestVote(addr, rc.currentTerm, rc.node.ID, lastLogIdx, lastLogTerm, rc.node.ID, rc.rpcEventCh)
 							if err == nil {
 								votesCh <- granted // true or false
 							}
@@ -448,7 +466,7 @@ func (rc *RaftConsensus) Start(store *storage.Store) {
 							if nextIdx <= len(rc.node.Log) {
 								entries = rc.node.Log[nextIdx-1:]
 							}
-							go rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries)
+							go rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries, rc.node.ID, rc.rpcEventCh)
 						}
 						rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
 					} else {
@@ -492,7 +510,7 @@ func (rc *RaftConsensus) Start(store *storage.Store) {
 							rc.node.Mu.RUnlock()
 
 							// RPC call with cached values
-							success, newTerm, err := rpc.SendAppendEntries(followerAddr, currentTerm, leaderId, prevLogIdx, prevLogTerm, commitIdx, entries)
+							success, newTerm, err := rpc.SendAppendEntries(followerAddr, currentTerm, leaderId, prevLogIdx, prevLogTerm, commitIdx, entries, rc.node.ID, rc.rpcEventCh)
 
 							if err != nil {
 								return
@@ -702,13 +720,47 @@ func (rc *RaftConsensus) calculateCommitIndex() {
 	}
 	majorityIndex := matchIndexes[len(matchIndexes)/2] // majority index
 
-	rc.node.Mu.RLock()
+	rc.node.Mu.Lock()
 	if majorityIndex > rc.node.CommitIdx && majorityIndex <= len(rc.node.Log) {
 		// check if the entry at majorityIndex is from current term
 		if majorityIndex == 0 || (majorityIndex > 0 && rc.node.Log[majorityIndex-1].Term == rc.currentTerm) {
 			rc.node.CommitIdx = majorityIndex
 		}
 	}
-	rc.node.Mu.RUnlock()
+	rc.node.Mu.Unlock()
 
+}
+
+/*
+	EmitRPCEvent : emits RPC events for monitoring and visualization.
+
+- this function allows the Raft consensus module to emit events related to RPC calls,
+such as sending or receiving RequestVote and AppendEntries messages.
+
+---
+EmitRPCEvent allows the Raft consensus module to emit events related to RPC calls,
+which can be used for monitoring and visualization purposes.
+*/
+func (rc *RaftConsensus) EmitRPCEvent(event types.RPCEvent) {
+	select {
+	case rc.rpcEventCh <- event:
+	default:
+		// If the channel is full, we can choose to drop the event or log it
+		log.Printf("RPC event channel is full, dropping event: %v", event)
+	}
+}
+
+/*
+	ConnectToManager : connects the node to the cluster manager.
+
+- this function can be called after the Raft consensus module has started,
+to register the node with the cluster manager and start sending it updates about the node's status and events.
+
+---
+ConnectToManager allows the node to connect to the cluster manager, which can be used for monitoring and managing the cluster.
+*/
+func (rc *RaftConsensus) ConnectToManager(managerAddress string) error {
+	// TODO : Implement the logic to connect to the cluster manager
+	// This could involve registering the node with the manager, etc.
+	return nil
 }

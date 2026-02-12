@@ -2,9 +2,10 @@
 package rpc
 
 import (
-	"distributed-kv/types"
 	"net"
 	"net/rpc"
+
+	"distributed-kv/types"
 )
 
 /*
@@ -31,38 +32,49 @@ Node B → Network (RPC response) → Node A
 
 type RaftServer struct {
 	consensus types.ConsensusModule
+	nodeID    int
 }
 
-func NewRaftServer(consensus types.ConsensusModule) *RaftServer {
+func NewRaftServer(consensus types.ConsensusModule, nodeID int) *RaftServer {
 	return &RaftServer{
 		consensus: consensus,
+		nodeID:    nodeID,
 	}
 }
 
-func (rs *RaftServer) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
+func (rs *RaftServer) RequestVote(args *types.RequestVoteArgs, reply *types.RequestVoteReply) error {
 	voteGranted, term := rs.consensus.RequestVote(args.Term, args.CandidateID, args.LastLogIndex, args.LastLogTerm)
 
 	reply.Term = term
 	reply.VoteGranted = voteGranted
 
+	rs.consensus.EmitRPCEvent(types.EmitRequestVoteEvent(rs.nodeID, args.CandidateID, *args, *reply, 0, ""))
+
 	return nil
 }
 
-func (rs *RaftServer) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
+func (rs *RaftServer) AppendEntries(args *types.AppendEntriesArgs, reply *types.AppendEntriesReply) error {
 	err := rs.consensus.AppendEntries(args.Term, args.LeaderID, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Entries)
 
 	reply.Term = rs.consensus.GetCurrentTerm()
 	if err != nil {
 		reply.Success = false
-		return nil // Don't return error, Raft expects false Success
+	} else {
+		reply.Success = true
 	}
-	reply.Success = true
+
+	errStr := ""
+	if err != nil {
+		errStr = err.Error()
+	}
+	rs.consensus.EmitRPCEvent(types.EmitAppendEntriesEvent(rs.nodeID, args.LeaderID, *args, *reply, 0, errStr))
+
 	return nil
 }
 
 // StartServer registers the RPC server and listens for incoming requests
 func StartServer(consensus types.ConsensusModule, address string) error {
-	raftServer := NewRaftServer(consensus) // starts a new RPC server instance
+	raftServer := NewRaftServer(consensus, consensus.GetNodeID()) // starts a new RPC server instance
 
 	// register the RPC server using net/rpc
 	err := rpc.Register(raftServer)

@@ -17,7 +17,12 @@ type ConsensusModule interface {
 	RequestVote(term int, candidateId int, lastLogIndex int, lastLogTerm int) (bool, int)
 	AppendEntries(term int, leaderId int, prevLogIndex int, prevLogTerm int, leaderCommit int, entries []LogEntry) error
 	GetCurrentTerm() int
+	GetNodeID() int
+	GetNodeStatus() (int, string, int, int)
+	GetVotedFor() int
+	GetRole() string
 	Propose(command string) (index int, term int, isLeader bool)
+	EmitRPCEvent(event RPCEvent)
 }
 
 type Persister struct {

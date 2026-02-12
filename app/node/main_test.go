@@ -4,12 +4,16 @@ import (
 	"distributed-kv/consensus"
 	"distributed-kv/storage"
 	"distributed-kv/types"
+	"os"
 	"testing"
 	"time"
 )
 
 // TestMainIntegration tests the whole logic with multiple nodes, consensus, and storage
 func TestMainIntegration(t *testing.T) {
+	// Clean persisted state so tests start fresh
+	os.RemoveAll("./state")
+	t.Cleanup(func() { os.RemoveAll("./state") })
 	// Create 3 nodes for a Raft cluster
 	nodes := make([]*types.Node, 3)
 	stores := make([]*storage.Store, 3)

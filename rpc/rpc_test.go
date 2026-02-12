@@ -6,6 +6,7 @@ import (
 	"distributed-kv/types"
 	"net"
 	netRpc "net/rpc"
+	"os"
 	"testing"
 	"time"
 )
@@ -17,6 +18,21 @@ type MockConsensus struct {
 	currentTerm         int
 	lastVoteGranted     bool
 	lastAppendSucceeded bool
+}
+
+func (mc *MockConsensus) GetRole() string {
+	return "Follower" // Mock role
+}
+
+func (mc *MockConsensus) GetNodeStatus() (int, string, int, int) {
+	return mc.currentTerm, "Follower", 0, 0 // Mock status
+}
+
+func (mc *MockConsensus) GetVotedFor() int {
+	if mc.lastVoteGranted {
+		return 1 // Mock candidate ID that was voted for
+	}
+	return -1 // No vote granted
 }
 
 func (mc *MockConsensus) RequestVote(term int, candidateId int, lastLogIndex int, lastLogTerm int) (bool, int) {
@@ -50,11 +66,19 @@ func (mc *MockConsensus) GetCurrentTerm() int {
 	return mc.currentTerm
 }
 
+func (mc *MockConsensus) GetNodeID() int {
+	return 1 // Mock node ID
+}
+
 func (mc *MockConsensus) GetApplyCh() <-chan types.ApplyMsg {
 	// Mock implementation - return closed channel
 	ch := make(chan types.ApplyMsg)
 	close(ch)
 	return ch
+}
+
+func (mc *MockConsensus) EmitRPCEvent(event types.RPCEvent) {
+	// Mock implementation - do nothing
 }
 
 func (mc *MockConsensus) Start() {
@@ -63,7 +87,7 @@ func (mc *MockConsensus) Start() {
 
 // Helper function to start a test RPC server with its own registry
 func startTestServer(consensus types.ConsensusModule, address string) error {
-	raftServer := rpc.NewRaftServer(consensus)
+	raftServer := rpc.NewRaftServer(consensus, 1) // Use nodeID 1 for testing
 
 	// Create a new RPC server instance to avoid conflicts with global registry
 	server := netRpc.NewServer()
@@ -93,7 +117,7 @@ func TestRequestVoteRPC(t *testing.T) {
 	}
 
 	// Make RPC call
-	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0)
+	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, nil)
 
 	if err != nil {
 		t.Fatalf("SendRequestVote failed: %v", err)
@@ -123,7 +147,7 @@ func TestRequestVoteRPCLowerTerm(t *testing.T) {
 	}
 
 	// Make RPC call with lower term
-	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0)
+	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, nil)
 
 	if err != nil {
 		t.Fatalf("SendRequestVote failed: %v", err)
@@ -158,7 +182,7 @@ func TestAppendEntriesRPC(t *testing.T) {
 	}
 
 	// Make RPC call
-	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries)
+	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries, 1, nil)
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
@@ -188,7 +212,7 @@ func TestAppendEntriesHeartbeat(t *testing.T) {
 	}
 
 	// Send heartbeat (empty entries)
-	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{})
+	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{}, 1, nil)
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries heartbeat failed: %v", err)
@@ -205,7 +229,7 @@ func TestAppendEntriesHeartbeat(t *testing.T) {
 
 func TestRequestVoteConnectionFailure(t *testing.T) {
 	// Try to connect to non-existent server
-	granted, term, err := rpc.SendRequestVote("localhost:9999", 1, 1, 0, 0)
+	granted, term, err := rpc.SendRequestVote("localhost:9999", 1, 1, 0, 0, 1, nil)
 
 	if err == nil {
 		t.Errorf("Expected connection error, but got none")
@@ -222,7 +246,7 @@ func TestRequestVoteConnectionFailure(t *testing.T) {
 
 func TestAppendEntriesConnectionFailure(t *testing.T) {
 	// Try to connect to non-existent server
-	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{})
+	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{}, 1, nil)
 
 	if err == nil {
 		t.Errorf("Expected connection error, but got none")
@@ -238,6 +262,10 @@ func TestAppendEntriesConnectionFailure(t *testing.T) {
 }
 
 func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
+	// Clean persisted state so the test starts fresh
+	os.RemoveAll("./state")
+	t.Cleanup(func() { os.RemoveAll("./state") })
+
 	// Create a real RaftConsensus instance
 	node := &types.Node{
 		ID:        1,
@@ -258,7 +286,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 	}
 
 	// Test RequestVote
-	granted, term, err := rpc.SendRequestVote(address, 2, 2, 0, 0)
+	granted, term, err := rpc.SendRequestVote(address, 2, 2, 0, 0, 2, nil)
 	if err != nil {
 		t.Fatalf("SendRequestVote failed: %v", err)
 	}
@@ -281,7 +309,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 		},
 	}
 
-	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries)
+	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries, 2, nil)
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
 	}

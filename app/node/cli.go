@@ -2,21 +2,27 @@ package main
 
 import (
 	"bufio"
+	"distributed-kv/handlers"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 )
 
+func startManagerCLI() {
+	// TODO later: add commands to view cluster state, view events, etc.
+	select {} // block forever since the manager doesn't have a CLI yet, but we want to keep it running to serve the API and manage the cluster
+}
+
 func startCLI() {
 	// Start Raft consensus
-	nodeId, nodeRole := raftConsensus.GetNodeInfo()
+	nodeId, nodeRole, _, _ := raftConsensus.GetNodeStatus()
 	log.Printf("Node %d started. Role: %s", nodeId, nodeRole)
 
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		nodeId, nodeRole := raftConsensus.GetNodeInfo()
+		nodeId, nodeRole, _, _ := raftConsensus.GetNodeStatus()
 		fmt.Printf("\n[Node %d - %s] > ", nodeId, nodeRole)
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
@@ -70,6 +76,7 @@ func handleGet(parts []string) {
 	}
 
 	key := parts[1]
+
 	value, exists := store.Get(key)
 	if !exists {
 		fmt.Printf("Key '%s' not found\n", key)
@@ -86,21 +93,14 @@ func handleSet(parts []string) {
 	}
 
 	// Check if node is leader first
-	_, role := raftConsensus.GetNodeInfo()
-	if role != "Leader" {
-		fmt.Println("Error: Not the leader")
-		return
-	}
-
 	key := parts[1]
 	value := strings.Join(parts[2:], " ")
 
-	// Format command as "SET:key:value"
-	command := fmt.Sprintf("SET:%s:%s", key, value)
-
-	// Propose the command to Raft consensus
-	index, term, _ := raftConsensus.Propose(command)
-	fmt.Printf("✓ Proposed SET %s = %s (index: %d, term: %d) - waiting for commitment...\n", key, value, index, term)
+	err := handlers.SetHandler(raftConsensus, key, value)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 }
 
 func handleDelete(parts []string) {
@@ -109,21 +109,13 @@ func handleDelete(parts []string) {
 		return
 	}
 
-	// Check if node is leader first
-	_, role := raftConsensus.GetNodeInfo()
-	if role != "Leader" {
-		fmt.Println("Error: Not the leader")
-		return
-	}
-
 	key := parts[1]
 
-	// Format command as "DELETE:key"
-	command := fmt.Sprintf("DELETE:%s", key)
-
-	// Propose the command to Raft consensus
-	index, term, _ := raftConsensus.Propose(command)
-	fmt.Printf("✓ Proposed DELETE %s (index: %d, term: %d) - waiting for commitment...\n", key, index, term)
+	err := handlers.DeleteHandler(raftConsensus, key)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 }
 
 func handleAll() {
@@ -148,13 +140,6 @@ func handleLog() {
 }
 
 func handleClean() {
-	// Check if node is leader first
-	_, role := raftConsensus.GetNodeInfo()
-	if role != "Leader" {
-		fmt.Println("Error: Not the leader")
-		return
-	}
-
 	// wait for confirmation before proposing to avoid multiple CLEAN commands being proposed at the same time
 	fmt.Print("Are you sure you want to CLEAN all data? This action cannot be undone. (yes/no): ")
 	reader := bufio.NewReader(os.Stdin)
@@ -166,9 +151,11 @@ func handleClean() {
 		return
 	}
 
-	// Propose the command to Raft consensus
-	index, term, _ := raftConsensus.Propose("CLEAN")
-	fmt.Printf("✓ Proposed CLEAN all data (index: %d, term: %d) - waiting for commitment...\n", index, term)
+	err := handlers.CleanHandler(raftConsensus)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 }
 
 func handleHelp() {
