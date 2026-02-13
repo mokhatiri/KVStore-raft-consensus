@@ -32,6 +32,7 @@ func TestMainIntegration(t *testing.T) {
 			ID:        i + 1,
 			Address:   peerAddresses[i],
 			Peers:     make([]string, 0),
+			PeerIDs:   make([]int, 0),
 			Role:      "Follower",
 			Log:       []types.LogEntry{},
 			CommitIdx: 0,
@@ -41,6 +42,7 @@ func TestMainIntegration(t *testing.T) {
 		for j := 0; j < 3; j++ {
 			if i != j {
 				nodes[i].Peers = append(nodes[i].Peers, peerAddresses[j])
+				nodes[i].PeerIDs = append(nodes[i].PeerIDs, j+1) // Node IDs are 1, 2, 3
 			}
 		}
 

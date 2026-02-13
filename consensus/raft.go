@@ -3,11 +3,11 @@ package consensus
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
 
+	"distributed-kv/clustermanager"
 	"distributed-kv/rpc"
 	"distributed-kv/storage"
 	"distributed-kv/types"
@@ -27,9 +27,12 @@ type RaftConsensus struct {
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
 
-	node       *types.Node
-	persister  *types.Persister
-	rpcEventCh chan types.RPCEvent
+	node             *types.Node
+	persister        *types.Persister
+	rpcEventCh       chan types.RPCEvent
+	logBuffer        *clustermanager.LogBuffer // Buffer for node logs
+	managerConnected bool                      // Flag to track if manager is reachable
+	managerAddress   string                    // Manager address for connectivity checks
 	// the node has:
 	// ID, Address, Peers, Role, Log, CommitIdx
 }
@@ -39,8 +42,9 @@ func NewRaftConsensus(node *types.Node) *RaftConsensus {
 
 	// Load persisted state if available
 	term, votedFor, logEntries, err := persister.LoadState()
+	logBuffer := clustermanager.NewLogBuffer(1000)
 	if err != nil {
-		log.Printf("Error reading persisted state: %v", err)
+		logBuffer.AddLog("ERROR", fmt.Sprintf("Error reading persisted state: %v", err))
 	}
 
 	// put the log in place
@@ -63,6 +67,7 @@ func NewRaftConsensus(node *types.Node) *RaftConsensus {
 
 		node:       node,
 		persister:  persister,
+		logBuffer:  logBuffer,
 		rpcEventCh: make(chan types.RPCEvent, 100), // channel to emit RPC events for monitoring
 	}
 }
@@ -122,6 +127,18 @@ func (rc *RaftConsensus) GetRole() string {
 	rc.node.Mu.RLock()
 	defer rc.node.Mu.RUnlock()
 	return rc.node.Role
+}
+
+func (rc *RaftConsensus) GetLogs(limit int) []clustermanager.LogMessage {
+	return rc.logBuffer.GetLogs(limit)
+}
+
+func (rc *RaftConsensus) AddLog(level string, message string) {
+	rc.logBuffer.AddLog(level, message)
+}
+
+func (rc *RaftConsensus) GetLogBuffer() *clustermanager.LogBuffer {
+	return rc.logBuffer
 }
 
 func (rc *RaftConsensus) GetCurrentTerm() int {
@@ -466,7 +483,8 @@ func (rc *RaftConsensus) Start(store *storage.Store) {
 							if nextIdx <= len(rc.node.Log) {
 								entries = rc.node.Log[nextIdx-1:]
 							}
-							go rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries, rc.node.ID, rc.rpcEventCh)
+							followerID := rc.node.PeerIDs[i]
+							go rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries, rc.node.ID, followerID, rc.rpcEventCh)
 						}
 						rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
 					} else {
@@ -507,10 +525,11 @@ func (rc *RaftConsensus) Start(store *storage.Store) {
 								entries = make([]types.LogEntry, len(original))
 								copy(entries, original)
 							}
+							followerID := rc.node.PeerIDs[followerIdx]
 							rc.node.Mu.RUnlock()
 
 							// RPC call with cached values
-							success, newTerm, err := rpc.SendAppendEntries(followerAddr, currentTerm, leaderId, prevLogIdx, prevLogTerm, commitIdx, entries, rc.node.ID, rc.rpcEventCh)
+							success, newTerm, err := rpc.SendAppendEntries(followerAddr, currentTerm, leaderId, prevLogIdx, prevLogTerm, commitIdx, entries, rc.node.ID, followerID, rc.rpcEventCh)
 
 							if err != nil {
 								return
@@ -626,13 +645,12 @@ func (rc *RaftConsensus) StartConsumption(store *storage.Store) {
 		entry := applyMsg.Command
 		commandStr := entry.Command
 
-		// for the cli visualisation!
-		log.Printf("\n[Node %d] Received committed entry: Term %d, Command: %s (index: %d)", id, entry.Term, commandStr, applyMsg.CommandIndex)
+		rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Received committed entry: Term %d, Command: %s (index: %d)", id, entry.Term, commandStr, applyMsg.CommandIndex))
 
 		// Parse the command string
 		parts := strings.SplitN(commandStr, ":", 3)
 		if len(parts) < 1 {
-			log.Printf("[Node %d] Invalid command format: %s", id, commandStr)
+			rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Invalid command format: %s", id, commandStr))
 			continue
 		}
 
@@ -641,31 +659,31 @@ func (rc *RaftConsensus) StartConsumption(store *storage.Store) {
 		switch commandType {
 		case "SET":
 			if len(parts) < 3 {
-				log.Printf("[Node %d] Invalid SET command format: %s", id, commandStr)
+				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Invalid SET command format: %s", id, commandStr))
 				continue
 			}
 			key := parts[1]
 			value := parts[2]
 			store.Set(key, value)
-			log.Printf("[Node %d] Applied SET %s = %s (index: %d)", id, key, value, applyMsg.CommandIndex)
+			rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied SET %s = %s (index: %d)", id, key, value, applyMsg.CommandIndex))
 
 		case "DELETE":
 			if len(parts) < 2 {
-				log.Printf("[Node %d] Invalid DELETE command format: %s", id, commandStr)
+				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Invalid DELETE command format: %s", id, commandStr))
 				continue
 			}
 			key := parts[1]
 			store.Delete(key)
-			log.Printf("[Node %d] Applied DELETE %s (index: %d)", id, key, applyMsg.CommandIndex)
+			rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied DELETE %s (index: %d)", id, key, applyMsg.CommandIndex))
 
 		case "CLEAN":
 			rc.persister.ClearState()
 			store.ClearAll()
 			rc.node.Log = []types.LogEntry{} // clear in-memory log as well
-			log.Printf("[Node %d] Applied CLEAN all data (index: %d)", id, applyMsg.CommandIndex)
+			rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied CLEAN all data (index: %d)", id, applyMsg.CommandIndex))
 
 		default:
-			log.Printf("[Node %d] Unknown command type: %s", id, commandType)
+			rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Unknown command type: %s", id, commandType))
 		}
 	}
 }
@@ -745,8 +763,7 @@ func (rc *RaftConsensus) EmitRPCEvent(event types.RPCEvent) {
 	select {
 	case rc.rpcEventCh <- event:
 	default:
-		// If the channel is full, we can choose to drop the event or log it
-		log.Printf("RPC event channel is full, dropping event: %v", event)
+		rc.logBuffer.AddLog("WARN", fmt.Sprintf("RPC event channel is full, dropping event: %v", event))
 	}
 }
 
@@ -759,8 +776,66 @@ to register the node with the cluster manager and start sending it updates about
 ---
 ConnectToManager allows the node to connect to the cluster manager, which can be used for monitoring and managing the cluster.
 */
-func (rc *RaftConsensus) ConnectToManager(managerAddress string) error {
-	// TODO : Implement the logic to connect to the cluster manager
-	// This could involve registering the node with the manager, etc.
-	return nil
+func (rc *RaftConsensus) ConnectToManager(managerAddress string, apihttpAddress string) {
+	rc.managerAddress = managerAddress
+	rc.managerConnected = true // Assume connected initially
+
+	// Goroutine 1: drain rpcEventCh and forward events to manager
+	go func() {
+		for event := range rc.rpcEventCh {
+			err := rpc.SendRPCEventToManager(managerAddress, event)
+			if err != nil {
+				// Only log if we haven't already logged this disconnection
+				if rc.managerConnected {
+					rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Error sending RPC event to manager: %v", err))
+					rc.managerConnected = false
+				}
+			} else {
+				// Log reconnection
+				if !rc.managerConnected {
+					rc.logBuffer.AddLog("INFO", "Successfully reconnected to manager")
+					rc.managerConnected = true
+				}
+			}
+		}
+	}()
+
+	// Goroutine 2: send periodic node state updates to manager
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			rc.node.Mu.RLock()
+			nodeState := types.NodeState{
+				ID:          rc.node.ID,
+				Role:        rc.node.Role,
+				Term:        rc.currentTerm,
+				CommitIndex: rc.node.CommitIdx,
+				LastApplied: rc.lastApplied,
+				LogLength:   len(rc.node.Log),
+				RPCAddress:  rc.node.Address,
+				HTTPAddress: apihttpAddress,
+
+				IsAlive:  true,
+				LastSeen: time.Now(),
+			}
+			rc.node.Mu.RUnlock()
+
+			err := rpc.SendNodeStateToManager(managerAddress, nodeState)
+			if err != nil {
+				// Only log if we haven't already logged this disconnection
+				if rc.managerConnected {
+					rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Error sending node state to manager: %v", err))
+					rc.managerConnected = false
+				}
+			} else {
+				// Log reconnection
+				if !rc.managerConnected {
+					rc.logBuffer.AddLog("INFO", "Successfully reconnected to manager")
+					rc.managerConnected = true
+				}
+			}
+		}
+	}()
 }

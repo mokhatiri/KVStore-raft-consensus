@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"distributed-kv/clustermanager"
 	"distributed-kv/types"
 	"os"
 	"testing"
@@ -46,6 +47,7 @@ func setupTestRaft(t *testing.T, id int) (*types.Node, *RaftConsensus) {
 		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond),
 		node:           node,
 		persister:      persister,
+		logBuffer:      clustermanager.NewLogBuffer(100),
 		rpcEventCh:     make(chan types.RPCEvent, 100),
 	}
 	return node, rc
@@ -331,7 +333,7 @@ func TestGetNodeID(t *testing.T) {
 func TestEmitRPCEvent(t *testing.T) {
 	_, rc := setupTestRaft(t, 1)
 
-	event := types.NewRPCEvent(1, 2, "RequestVote", nil, 0, "")
+	event := types.NewRPCEvent(1, 2, "RequestVote", "", 0, "")
 	rc.EmitRPCEvent(event)
 
 	// Read from channel
@@ -354,11 +356,11 @@ func TestEmitRPCEventChannelFull(t *testing.T) {
 
 	// Fill the channel (buffer size is 100)
 	for i := 0; i < 100; i++ {
-		rc.EmitRPCEvent(types.NewRPCEvent(1, 2, "test", nil, 0, ""))
+		rc.EmitRPCEvent(types.NewRPCEvent(1, 2, "test", "", 0, ""))
 	}
 
 	// This should not block — event gets dropped
-	rc.EmitRPCEvent(types.NewRPCEvent(1, 2, "dropped", nil, 0, ""))
+	rc.EmitRPCEvent(types.NewRPCEvent(1, 2, "dropped", "", 0, ""))
 	// If we reach here without hanging, the test passes
 }
 

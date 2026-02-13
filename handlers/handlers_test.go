@@ -49,7 +49,7 @@ func (m *MockConsensus) EmitRPCEvent(event types.RPCEvent) {}
 func TestSetHandlerAsLeader(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 
-	err := SetHandler(mock, "name", "alice")
+	_, err := SetHandler(mock, "name", "alice")
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestSetHandlerAsLeader(t *testing.T) {
 func TestSetHandlerAsFollower(t *testing.T) {
 	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2}
 
-	err := SetHandler(mock, "name", "alice")
+	_, err := SetHandler(mock, "name", "alice")
 	if err == nil {
 		t.Fatal("Expected error for non-leader, got nil")
 	}
@@ -79,7 +79,7 @@ func TestSetHandlerAsFollower(t *testing.T) {
 func TestSetHandlerAsCandidate(t *testing.T) {
 	mock := &MockConsensus{role: "Candidate", term: 1, nodeID: 1}
 
-	err := SetHandler(mock, "key", "value")
+	_, err := SetHandler(mock, "key", "value")
 	if err == nil {
 		t.Fatal("Expected error for candidate, got nil")
 	}
@@ -92,7 +92,7 @@ func TestSetHandlerAsCandidate(t *testing.T) {
 func TestDeleteHandlerAsLeader(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 2, nodeID: 1}
 
-	err := DeleteHandler(mock, "mykey")
+	_, err := DeleteHandler(mock, "mykey")
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestDeleteHandlerAsLeader(t *testing.T) {
 func TestDeleteHandlerAsFollower(t *testing.T) {
 	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2}
 
-	err := DeleteHandler(mock, "mykey")
+	_, err := DeleteHandler(mock, "mykey")
 	if err == nil {
 		t.Fatal("Expected error for non-leader, got nil")
 	}
@@ -126,7 +126,7 @@ func TestDeleteHandlerAsFollower(t *testing.T) {
 func TestCleanHandlerAsLeader(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 
-	err := CleanHandler(mock)
+	_, err := CleanHandler(mock)
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestCleanHandlerAsLeader(t *testing.T) {
 func TestCleanHandlerAsFollower(t *testing.T) {
 	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3}
 
-	err := CleanHandler(mock)
+	_, err := CleanHandler(mock)
 	if err == nil {
 		t.Fatal("Expected error for non-leader, got nil")
 	}

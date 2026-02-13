@@ -67,8 +67,19 @@ func (rs *RaftServer) AppendEntries(args *types.AppendEntriesArgs, reply *types.
 	if err != nil {
 		errStr = err.Error()
 	}
-	rs.consensus.EmitRPCEvent(types.EmitAppendEntriesEvent(rs.nodeID, args.LeaderID, *args, *reply, 0, errStr))
 
+	// Only emit events for actual log entries or errors
+	// Skip empty heartbeats completely to avoid log spam
+	if len(args.Entries) > 0 || errStr != "" {
+		rs.consensus.EmitRPCEvent(types.EmitAppendEntriesEvent(rs.nodeID, args.LeaderID, *args, *reply, 0, errStr))
+	}
+
+	return nil
+}
+
+// Ping is a simple health check endpoint that returns true if the node is alive
+func (rs *RaftServer) Ping(nodeID int, reply *bool) error {
+	*reply = true
 	return nil
 }
 

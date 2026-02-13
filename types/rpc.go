@@ -1,26 +1,31 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type RPCEvent struct {
-	Timestamp time.Time
-	From      int
-	To        int
-	Type      string
-	Details   any
-	Duration  time.Duration
-	Error     string
+	Timestamp   time.Time
+	From        int
+	To          int
+	Type        string
+	Details     string // Changed from interface{} to string to be gob-serializable
+	Duration    time.Duration
+	Error       string
+	IsHeartbeat bool // true if this is an AppendEntries heartbeat
 }
 
-func NewRPCEvent(from, to int, rpcType string, details any, duration time.Duration, err string) RPCEvent {
+func NewRPCEvent(from, to int, rpcType string, details string, duration time.Duration, err string) RPCEvent {
 	return RPCEvent{
-		Timestamp: time.Now(),
-		From:      from,
-		To:        to,
-		Type:      rpcType,
-		Details:   details,
-		Duration:  duration,
-		Error:     err,
+		Timestamp:   time.Now(),
+		From:        from,
+		To:          to,
+		Type:        rpcType,
+		Details:     details,
+		Duration:    duration,
+		Error:       err,
+		IsHeartbeat: false,
 	}
 }
 
@@ -52,15 +57,26 @@ type AppendEntriesReply struct {
 
 // methodes to emit RPC events
 func EmitRequestVoteEvent(from, to int, args RequestVoteArgs, reply RequestVoteReply, duration time.Duration, err string) RPCEvent {
-	return NewRPCEvent(from, to, "RequestVote", map[string]any{
+	details := map[string]any{
 		"args":  args,
 		"reply": reply,
-	}, duration, err)
+	}
+	detailsJSON, _ := json.Marshal(details)
+	return NewRPCEvent(from, to, "RequestVote", string(detailsJSON), duration, err)
 }
 
 func EmitAppendEntriesEvent(from, to int, args AppendEntriesArgs, reply AppendEntriesReply, duration time.Duration, err string) RPCEvent {
-	return NewRPCEvent(from, to, "AppendEntries", map[string]any{
+	details := map[string]any{
 		"args":  args,
 		"reply": reply,
-	}, duration, err)
+	}
+	detailsJSON, _ := json.Marshal(details)
+	event := NewRPCEvent(from, to, "AppendEntries", string(detailsJSON), duration, err)
+	// Mark as heartbeat if no entries to replicate
+	event.IsHeartbeat = len(args.Entries) == 0
+	return event
+}
+
+func EmitPingEvent(from, to int, duration time.Duration, err string) RPCEvent {
+	return NewRPCEvent(from, to, "Ping", "", duration, err)
 }

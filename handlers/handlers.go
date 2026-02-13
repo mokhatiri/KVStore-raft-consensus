@@ -6,10 +6,10 @@ import (
 	"distributed-kv/types"
 )
 
-func SetHandler(raftConsensus types.ConsensusModule, key, value string) error {
+func SetHandler(raftConsensus types.ConsensusModule, key, value string) (string, error) {
 	role := raftConsensus.GetRole()
 	if role != "Leader" {
-		return fmt.Errorf("Error: Not the leader")
+		return "", fmt.Errorf("Error: Not the leader")
 	}
 
 	// Format command as "SET:key:value"
@@ -17,14 +17,13 @@ func SetHandler(raftConsensus types.ConsensusModule, key, value string) error {
 
 	// Propose the command to Raft consensus
 	index, term, _ := raftConsensus.Propose(command)
-	fmt.Printf("✓ Proposed SET %s = %s (index: %d, term: %d) - waiting for commitment...\n", key, value, index, term)
-	return nil
+	return fmt.Sprintf("✓ Proposed SET %s = %s (index: %d, term: %d) - waiting for commitment...", key, value, index, term), nil
 }
 
-func DeleteHandler(raftConsensus types.ConsensusModule, key string) error {
+func DeleteHandler(raftConsensus types.ConsensusModule, key string) (string, error) {
 	role := raftConsensus.GetRole()
 	if role != "Leader" {
-		return fmt.Errorf("Error: Not the leader")
+		return "", fmt.Errorf("Error: Not the leader")
 	}
 
 	// Format command as "DELETE:key"
@@ -32,14 +31,13 @@ func DeleteHandler(raftConsensus types.ConsensusModule, key string) error {
 
 	// Propose the command to Raft consensus
 	index, term, _ := raftConsensus.Propose(command)
-	fmt.Printf("✓ Proposed DELETE %s (index: %d, term: %d) - waiting for commitment...\n", key, index, term)
-	return nil
+	return fmt.Sprintf("✓ Proposed DELETE %s (index: %d, term: %d) - waiting for commitment...", key, index, term), nil
 }
 
-func CleanHandler(raftConsensus types.ConsensusModule) error {
+func CleanHandler(raftConsensus types.ConsensusModule) (string, error) {
 	role := raftConsensus.GetRole()
 	if role != "Leader" {
-		return fmt.Errorf("Error: Not the leader")
+		return "", fmt.Errorf("Error: Not the leader")
 	}
 
 	// Format command as "CLEAN"
@@ -47,6 +45,5 @@ func CleanHandler(raftConsensus types.ConsensusModule) error {
 
 	// Propose the command to Raft consensus
 	index, term, _ := raftConsensus.Propose(command)
-	fmt.Printf("✓ Proposed CLEAN (index: %d, term: %d) - waiting for commitment...\n", index, term)
-	return nil
+	return fmt.Sprintf("✓ Proposed CLEAN (index: %d, term: %d) - waiting for commitment...", index, term), nil
 }

@@ -1,4 +1,4 @@
-package api
+package nodeapi
 
 import (
 	"encoding/json"
@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"distributed-kv/clustermanager"
 	"distributed-kv/storage"
 	"distributed-kv/types"
 )
@@ -52,9 +53,9 @@ func (m *MockConsensus) EmitRPCEvent(event types.RPCEvent) {}
 
 // --- Helper to build a test server with mux (not listening) ---
 
-func setupTestServer(mock *MockConsensus) (*Server, *http.ServeMux) {
+func setupTestServer(mock *MockConsensus) (*NodeServer, *http.ServeMux) {
 	store := storage.NewStore()
-	s := NewServer(store, mock, ":0")
+	s := NewNodeServer(store, mock, ":0", clustermanager.NewLogBuffer(100))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/kv/", func(w http.ResponseWriter, r *http.Request) {
@@ -367,7 +368,7 @@ func TestHealthContentType(t *testing.T) {
 func TestNewServer(t *testing.T) {
 	store := storage.NewStore()
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
-	s := NewServer(store, mock, ":9090")
+	s := NewNodeServer(store, mock, ":9090", clustermanager.NewLogBuffer(100))
 
 	if s.addr != ":9090" {
 		t.Errorf("Expected addr ':9090', got '%s'", s.addr)
@@ -380,7 +381,7 @@ func TestNewServer(t *testing.T) {
 func TestServerStartStop(t *testing.T) {
 	store := storage.NewStore()
 	mock := &MockConsensus{role: "Follower", term: 0, nodeID: 1}
-	s := NewServer(store, mock, ":0") // port 0 = random available port
+	s := NewNodeServer(store, mock, ":0", clustermanager.NewLogBuffer(100)) // port 0 = random available port
 
 	s.Start()
 	defer s.Stop()

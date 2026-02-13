@@ -182,7 +182,7 @@ func TestAppendEntriesRPC(t *testing.T) {
 	}
 
 	// Make RPC call
-	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries, 1, nil)
+	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries, 1, 2, nil)
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
@@ -212,7 +212,7 @@ func TestAppendEntriesHeartbeat(t *testing.T) {
 	}
 
 	// Send heartbeat (empty entries)
-	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{}, 1, nil)
+	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2, nil)
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries heartbeat failed: %v", err)
@@ -246,7 +246,7 @@ func TestRequestVoteConnectionFailure(t *testing.T) {
 
 func TestAppendEntriesConnectionFailure(t *testing.T) {
 	// Try to connect to non-existent server
-	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{}, 1, nil)
+	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2, nil)
 
 	if err == nil {
 		t.Errorf("Expected connection error, but got none")
@@ -271,6 +271,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 		ID:        1,
 		Address:   "localhost:9005",
 		Peers:     []string{"localhost:9006", "localhost:9007"},
+		PeerIDs:   []int{2, 3},
 		Role:      "Follower",
 		Log:       []types.LogEntry{},
 		CommitIdx: 0,
@@ -309,7 +310,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 		},
 	}
 
-	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries, 2, nil)
+	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries, 2, 3, nil)
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
 	}

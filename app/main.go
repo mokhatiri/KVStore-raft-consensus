@@ -9,7 +9,6 @@ import (
 	"os"
 	"time"
 
-	"distributed-kv/api"
 	"distributed-kv/clustermanager"
 	"distributed-kv/consensus"
 	"distributed-kv/rpc"
@@ -31,11 +30,6 @@ import (
 	help                - Show commands
 */
 
-var (
-	raftConsensus *consensus.RaftConsensus
-	store         *storage.Store
-)
-
 func main() {
 	// Determine subcommand by checking the first argument before any flags
 	subcommand := "node"
@@ -47,44 +41,39 @@ func main() {
 	case "manager":
 		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
 		ManagerMain()
-	default:
+	case "node":
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
 		NodeMain()
+	default:
+		log.Fatalf("Unknown subcommand: %s. Use 'manager' or 'node'.", subcommand)
 	}
 }
 
 // main entry point for the manager node
 func ManagerMain() {
-	log.Println("------------------- Starting Cluster Manager ------------------")
-	dbPath, outputDir, address, clusterConfig := parseManagerArgs()
+	dbPath, outputDir, rpcAddress, httpAddress, clusterConfig := parseManagerArgs()
 
-	manager := clustermanager.NewManager(dbPath, outputDir)
-	err := manager.InitDB()
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
+	// start the cluster manager and its RPC server
+	manager := Managerstart(dbPath, outputDir, rpcAddress, clusterConfig)
 
-	for _, node := range clusterConfig.Nodes {
-		log.Printf("Node ID: %d, RPC Address: %s, HTTP Address: %s, pprof Address: %s\n", node.ID, node.RPCAddr, node.HTTPAddr, node.PProfAddr)
-		manager.RegisterNode(node.ID, node.RPCAddr, node.HTTPAddr, node.PProfAddr)
-	}
+	// start the manager's HTTP API server
+	startManagerAPI(httpAddress, manager)
 
-	manager.StartAPI(address)
-	startManagerCLI()
-	log.Println("-------------------- Cluster Manager Running ------------------")
+	// start the manager CLI
+	startManagerCLI(manager)
 }
 
-// Main entry point for the distributed key-value store node.
 func NodeMain() {
-	id, address, HTTPaddress, pprofServer, peers, managerAddress := parseArgs()
+	id, address, HTTPaddress, pprofServer, peers, peerIDs, managerAddress := parseNodeArgs()
 
 	// start the Raft
-	start(id, address, pprofServer, peers, managerAddress)
+	raftconsensus, store := Nodestart(id, address, pprofServer, peers, peerIDs, managerAddress, HTTPaddress)
 
 	// start the HTTP API server before the CLI
-	startAPI(HTTPaddress)
+	startNodeAPI(HTTPaddress, raftconsensus, store)
 
 	// start CLI
-	startCLI()
+	startNodeCLI(raftconsensus, store)
 }
 
 type Config struct {
@@ -104,7 +93,7 @@ type Config struct {
 	} `json:"manager"`
 }
 
-func parseManagerArgs() (string, string, string, Config) {
+func parseManagerArgs() (string, string, string, string, Config) {
 	// get the config file path from command line arguments
 	configPtr := flag.String("config", "cluster.json", "Path to config file")
 	flag.Parse()
@@ -120,10 +109,10 @@ func parseManagerArgs() (string, string, string, Config) {
 		log.Fatalf("Failed to parse config JSON: %v", err)
 	}
 
-	return config.ManagerAddress.DBPath, config.ManagerAddress.OutputDir, config.ManagerAddress.HTTPAddr, config
+	return config.ManagerAddress.DBPath, config.ManagerAddress.OutputDir, config.ManagerAddress.RPCAddr, config.ManagerAddress.HTTPAddr, config
 }
 
-func parseArgs() (int, string, string, string, []string, string) {
+func parseNodeArgs() (int, string, string, string, []string, []int, string) {
 	idPtr := flag.Int("id", 0, "Node ID")
 	configPtr := flag.String("config", "cluster.json", "Path to config file")
 	flag.Parse()
@@ -144,10 +133,12 @@ func parseArgs() (int, string, string, string, []string, string) {
 	}
 
 	var peers []string
+	var peerIDs []int
 	found := false
 	for _, node := range config.Nodes {
 		if node.ID != *idPtr { // exclude self
 			peers = append(peers, node.RPCAddr)
+			peerIDs = append(peerIDs, node.ID)
 		} else {
 			address = node.RPCAddr
 			HTTPaddress = node.HTTPAddr
@@ -164,16 +155,17 @@ func parseArgs() (int, string, string, string, []string, string) {
 		log.Fatalf("Address for node %d is empty", *idPtr)
 	}
 
-	return *idPtr, address, HTTPaddress, pprofServer, peers, config.ManagerAddress.RPCAddr
+	return *idPtr, address, HTTPaddress, pprofServer, peers, peerIDs, config.ManagerAddress.RPCAddr
 }
 
-func start(id int, address string, pprofServer string, peers []string, managerAddress string) {
+func Nodestart(id int, address string, pprofServer string, peers []string, peerIDs []int, managerAddress string, apiHTTPAddress string) (*consensus.RaftConsensus, *storage.Store) {
 	// create the key-value store
-	store = storage.NewStore()
+	store := storage.NewStore()
 
 	// create a new node and Raft consensus module
 	newNode := types.NewNode(id, address, peers)
-	raftConsensus = consensus.NewRaftConsensus(newNode)
+	newNode.PeerIDs = peerIDs
+	raftConsensus := consensus.NewRaftConsensus(newNode)
 
 	// start the RPC server
 	log.Println("------------------- Starting RPC Server ---------------------")
@@ -214,32 +206,53 @@ func start(id int, address string, pprofServer string, peers []string, managerAd
 	// connect to the cluster manager
 	log.Println("------------------- Connecting to Cluster Manager ---------------------")
 	if managerAddress != "" {
-		err := raftConsensus.ConnectToManager(managerAddress)
-		if err != nil {
-			log.Fatalf("Failed to connect to cluster manager: %v", err)
-			log.Println("------------------- Cluster Manager Connection Failed ---------------------")
-		} else {
-			log.Println("Connected to cluster manager at", managerAddress)
-			log.Println("------------------- Cluster Manager Connected ---------------------")
-		}
+		raftConsensus.ConnectToManager(managerAddress, apiHTTPAddress)
+		log.Println("Connected to cluster manager at", managerAddress)
+		log.Println("------------------- Connected to Cluster Manager ---------------------")
+	} else {
+		log.Println("No cluster manager address provided, skipping connection")
+		log.Println("------------------- Cluster Manager Connection Skipped ---------------------")
 	}
 	// manager connection done
+
+	return raftConsensus, store
 }
 
-func startAPI(HTTPaddress string) {
-	log.Println("------------------- Starting API Server ------------------")
-	// check if HTTP address is provided
-	if HTTPaddress == "" {
-		log.Println("No HTTP address provided, skipping API server startup")
-		log.Println("-------------------- API Server Skipped ------------------")
-		return
+func Managerstart(dbPath string, outputDir string, address string, clusterConfig Config) *clustermanager.Manager {
+	manager := clustermanager.NewManager(dbPath, outputDir)
+
+	log.Println("------------------- Initializing Cluster Manager Database ------------------")
+	err := manager.InitDB()
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
 	}
+	log.Println("Cluster manager database initialized successfully on path:", dbPath)
+	log.Println("------------------- Cluster Manager Database Initialized ------------------")
 
-	log.Println("Starting HTTP API server on", HTTPaddress)
+	log.Println("------------------- Registering Nodes with Cluster Manager ------------------")
+	for _, node := range clusterConfig.Nodes {
+		log.Printf("Node ID: %d, RPC Address: %s, HTTP Address: %s, pprof Address: %s\n", node.ID, node.RPCAddr, node.HTTPAddr, node.PProfAddr)
+		manager.RegisterNode(node.ID, node.RPCAddr, node.HTTPAddr)
+	}
+	log.Println("------------------- Nodes Registered with Cluster Manager ------------------")
 
-	httpServer := api.NewServer(store, raftConsensus, HTTPaddress)
-	httpServer.Start()
+	// start the RPC server for the manager to receive events and node state updates
+	log.Println("------------------- Starting Manager RPC Server ---------------------")
+	manager.Start(address)
+	log.Println("Manager RPC server started on", address)
+	log.Println("------------------- Manager RPC Server Started ---------------------")
 
-	log.Println("HTTP API server started on", HTTPaddress)
-	log.Println("-------------------- API Server Running ------------------")
+	// start the manager's event aggregation
+	log.Println("------------------- Starting Cluster Manager ------------------")
+	manager.StartEventAggregation()
+	log.Println("Cluster manager started and aggregating events")
+	log.Println("------------------- Cluster Manager Started ------------------")
+
+	// start the manager's health check
+	log.Println("------------------- Starting Node Health Check ------------------")
+	manager.StartHealthCheck(5 * time.Second)
+	log.Println("Node health check started (checking every 5 seconds)")
+	log.Println("------------------- Node Health Check Started ------------------")
+
+	return manager
 }

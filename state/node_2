@@ -1,0 +1,1 @@
+{"current_term":29,"voted_for":2,"log":[{"term":15,"command":"SET:4:ehe","key":"4","value":"ehe"},{"term":19,"command":"SET:5:hhhh","key":"5","value":"hhhh"},{"term":29,"command":"SET:5:hhhh","key":"5","value":"hhhh"}]}

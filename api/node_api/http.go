@@ -1,14 +1,14 @@
 // Package api implements the HTTP API for client requests.
-package api
+package nodeapi
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
+	"distributed-kv/clustermanager"
 	"distributed-kv/handlers"
 	"distributed-kv/storage"
 	"distributed-kv/types"
@@ -27,25 +27,25 @@ import (
 	- Response: 200 OK if the server is healthy, or 503 Service Unavailable if the server is not healthy.
 */
 
-// TODO : impliment the manager
-
 // the server struct
-type Server struct {
+type NodeServer struct {
 	store       *storage.Store
 	consensus   types.ConsensusModule
 	addr        string
 	http_server *http.Server
+	logBuffer   *clustermanager.LogBuffer
 }
 
-func NewServer(store *storage.Store, consensus types.ConsensusModule, addr string) *Server {
-	return &Server{
+func NewNodeServer(store *storage.Store, consensus types.ConsensusModule, addr string, logBuffer *clustermanager.LogBuffer) *NodeServer {
+	return &NodeServer{
 		store:     store,
 		consensus: consensus,
 		addr:      addr,
+		logBuffer: logBuffer,
 	}
 }
 
-func (s *Server) Start() {
+func (s *NodeServer) Start() {
 	s.http_server = &http.Server{
 		Addr:         s.addr,
 		ReadTimeout:  5 * time.Second,
@@ -92,21 +92,21 @@ func (s *Server) Start() {
 
 	go func() {
 		if err := s.http_server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("HTTP server error: %v", err)
+			s.logBuffer.AddLog("ERROR", fmt.Sprintf("HTTP server error: %v", err))
 		}
 	}()
 }
 
-func (s *Server) Stop() {
+func (s *NodeServer) Stop() {
 	// signal the server to stop gracefully
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.http_server.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf("HTTP server shutdown error: %v", err))
 	}
 }
 
-func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) error {
+func (s *NodeServer) handleGet(w http.ResponseWriter, r *http.Request) error {
 	// Handle GET request to retrieve the value for a given key.
 
 	select {
@@ -137,7 +137,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) error {
+func (s *NodeServer) handleSet(w http.ResponseWriter, r *http.Request) error {
 	// Handle POST request to set the value for a given key.
 
 	select {
@@ -155,7 +155,7 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) error {
 		}
 
 		// use set handler
-		if err := handlers.SetHandler(s.consensus, key, fmt.Sprintf("%v", requestBody.Value)); err != nil {
+		if _, err := handlers.SetHandler(s.consensus, key, fmt.Sprintf("%v", requestBody.Value)); err != nil {
 			return fmt.Errorf("failed to set value: %w", err)
 		}
 
@@ -173,7 +173,7 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
+func (s *NodeServer) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	// Handle DELETE request to remove the value for a given key.
 
 	select {
@@ -185,7 +185,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 		key := r.URL.Path[len("/kv/"):]
 
 		// use delete handler
-		if err := handlers.DeleteHandler(s.consensus, key); err != nil {
+		if _, err := handlers.DeleteHandler(s.consensus, key); err != nil {
 			return fmt.Errorf("failed to delete value: %w", err)
 		}
 
@@ -196,17 +196,21 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) error {
+func (s *NodeServer) handleHealth(w http.ResponseWriter, r *http.Request) error {
 	_, role, commitIndex, logLen := s.consensus.GetNodeStatus()
 	term := s.consensus.GetCurrentTerm()
 	votedFor := s.consensus.GetVotedFor()
 	healthStatus := "healthy"
 
-	if term == 0 && votedFor == 1 {
+	// A node is unhealthy if it has no role or is stuck at term 0 with no vote
+	if role == "" || (term == 0 && votedFor == -1) {
 		healthStatus = "unhealthy"
 	}
 
 	statusCode := http.StatusOK
+	if healthStatus == "unhealthy" {
+		statusCode = http.StatusServiceUnavailable
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)

@@ -30,6 +30,8 @@ type NodeState struct {
 	CommitIndex int
 	LastApplied int
 	LogLength   int
+	RPCAddress  string
+	HTTPAddress string
 
 	// Health
 	IsAlive         bool
@@ -37,4 +39,14 @@ type NodeState struct {
 	LastSeen        time.Time
 }
 
-// TODO: code to update the ClusterState based on incoming events, e.g. UpdateClusterState(event RPCEvent) that updates the leader, term, replication progress, etc.
+type ManagerInterface interface {
+	SaveEvent(args RPCEvent) error
+	UpdateNodeState(args *NodeState) error
+	GetClusterState() *ClusterState
+	GetEvents(limit int) []RPCEvent
+}
+
+// Logger is a simple logging interface to avoid import cycles
+type Logger interface {
+	AddLog(level string, message string)
+}

@@ -2,21 +2,28 @@ package clustermanager
 
 import (
 	"database/sql"
+	managerapi "distributed-kv/api/manager_api"
 	"distributed-kv/types"
+	"encoding/csv"
 	"fmt"
+	"log"
+	"net/rpc"
+	"os"
+	"strconv"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type Manager struct {
 	eventBuffer *EventBuffer
+	logBuffer   *LogBuffer
 	db          *sql.DB
 	fileWriter  *EventFileWriter
 	eventsCh    chan types.RPCEvent
 
-	clusterState      *types.ClusterState
-	nodeSubscriptions map[int]<-chan types.RPCEvent
+	clusterState *types.ClusterState
 
 	mu sync.RWMutex
 }
@@ -28,18 +35,16 @@ func NewManager(dbPath string, outputDir string) *Manager {
 		panic(fmt.Sprintf("Failed to open database: %v", err))
 	}
 
-	// make the node subscriptions map
-	nodeSubscriptions := make(map[int]<-chan types.RPCEvent)
 	eventsCh := make(chan types.RPCEvent, EventBufferSize)
+	logBuffer := NewLogBuffer(1000)
 
 	return &Manager{
-		eventBuffer: NewEventBuffer(EventBufferSize),
-		db:          db,
-		fileWriter:  NewEventFileWriter(outputDir, eventsCh),
-		eventsCh:    eventsCh,
-
-		clusterState:      &types.ClusterState{},
-		nodeSubscriptions: nodeSubscriptions,
+		eventBuffer:  NewEventBuffer(EventBufferSize),
+		logBuffer:    logBuffer,
+		db:           db,
+		fileWriter:   NewEventFileWriter(outputDir, eventsCh, logBuffer),
+		eventsCh:     eventsCh,
+		clusterState: &types.ClusterState{Nodes: make(map[int]*types.NodeState)},
 	}
 }
 
@@ -61,86 +66,223 @@ func (m *Manager) InitDB() error {
 	return err
 }
 
-// SubscribeToNode allows a node to subscribe to cluster events. The manager will send relevant events to the provided channel.
-func (m *Manager) subscribeToNode(nodeID int, eventChan <-chan types.RPCEvent) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.nodeSubscriptions[nodeID] = eventChan
-}
-
-// UnsubscribeFromNode removes a node's subscription to cluster events.
-func (m *Manager) unsubscribeFromNode(nodeID int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.nodeSubscriptions, nodeID)
-}
-
 // register a node in the cluster and subscribe to its events
-func (m *Manager) RegisterNode(nodeId int, nodeRPCAddress string, nodeHTTPAddress string, nodePProfAddress string) {
-	// TODO
-}
-
-// start event aggregation : spawns goroutines for each subcription + file writer
-func (m *Manager) StartEventAggregation() {
-	// start the file writer goroutine
-	m.fileWriter.Start()
-
-	// start a goroutine for each node subscription to listen for events and process them
-	for nodeID, eventChan := range m.nodeSubscriptions {
-		go func(id int, ch <-chan types.RPCEvent) {
-			for event := range ch {
-				m.saveEvent(event)
-			}
-		}(nodeID, eventChan)
+func (m *Manager) RegisterNode(nodeId int, nodeRPCAddress string, nodeHTTPAddress string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clusterState.Nodes[nodeId] = &types.NodeState{
+		ID:          nodeId,
+		RPCAddress:  nodeRPCAddress,
+		HTTPAddress: nodeHTTPAddress,
 	}
 }
 
-// save event to backends
-func (m *Manager) saveEvent(event types.RPCEvent) {
-	// save to in-memory buffer
-	m.eventBuffer.AddEvent(event) // add lock
+func (m *Manager) StartEventAggregation() {
+	// start the file writer goroutine
+	m.fileWriter.Start()
+}
 
-	// save to sqlite db
+// save event to backends
+func (m *Manager) SaveEvent(event types.RPCEvent) error {
+	// Skip heartbeat events - don't add to buffer, but still save to DB and file
+	if !event.IsHeartbeat {
+		// save to in-memory buffer only for meaningful events
+		m.eventBuffer.AddEvent(event)
+		m.logBuffer.AddLog("DEBUG", fmt.Sprintf("Event saved: From=%d, To=%d, Type=%s, IsHeartbeat=%v", event.From, event.To, event.Type, event.IsHeartbeat))
+	}
+
+	// Always save to sqlite db (for full history)
 	_, err := m.db.Exec(`
 	INSERT INTO rpc_events (from_id, to_id, event_type, details, duration, error)
 	VALUES (?, ?, ?, ?, ?, ?);
 	`, event.From, event.To, event.Type, event.Details, event.Duration.Milliseconds(), event.Error)
 
 	if err != nil {
-		fmt.Printf("\n----\n-Error saving event to database : %v-\n----\n", err)
+		m.logBuffer.AddLog("ERROR", fmt.Sprintf("Error saving event to database: %v", err))
 	}
 
-	// send to events channel to save to file
+	// Always send to file writer (for full event log)
 	m.eventsCh <- event
 
-	m.updateClusterState(event)
+	return nil
 }
 
-// update cluster state based on event
-func (m *Manager) updateClusterState(event types.RPCEvent) {
-	// updates the cluster state based on the event type and details
-	// TODO ...
+func (m *Manager) UpdateNodeState(nodeState *types.NodeState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// update the cluster state with the new node state
+	m.clusterState.Nodes[nodeState.ID] = nodeState
+
+	// If this node is a leader, update cluster-level leader
+	if nodeState.Role == "Leader" {
+		m.clusterState.Leader = nodeState.ID
+	}
+
+	// Update current term to the maximum term seen
+	if nodeState.Term > m.clusterState.CurrentTerm {
+		m.clusterState.CurrentTerm = nodeState.Term
+	}
+
+	return nil
 }
 
 // get cluster status
-func (m *Manager) GetClusterStatus() *types.ClusterState {
+func (m *Manager) GetClusterState() *types.ClusterState {
 	return m.clusterState
 }
 
-// get events
+// get events (heartbeats already filtered from buffer)
 func (m *Manager) GetEvents(limit int) []types.RPCEvent {
 	return m.eventBuffer.GetLast(limit)
 }
 
-// start the API server to serve cluster status and events
-func (m *Manager) StartAPI(address string) {
-	// TODO : start API server to serve cluster status and events
-	/*
-		- Create routes for manager API:
-			GET /cluster/status
-			GET /cluster/events?limit=100
-			GET /cluster/nodes
-			etc.
-			- Pass manager to API handler so it can query data
-	*/
+// get all events from the buffer
+func (m *Manager) GetAllEvents() []types.RPCEvent {
+	return m.eventBuffer.GetAllEvents()
+}
+
+// get event statistics (heartbeats already filtered from buffer)
+func (m *Manager) GetEventStats() map[string]interface{} {
+	events := m.eventBuffer.GetAllEvents()
+	stats := make(map[string]interface{})
+
+	typeCount := make(map[string]int)
+	errorCount := 0
+	totalDuration := int64(0)
+
+	for _, event := range events {
+		typeCount[event.Type]++
+		totalDuration += event.Duration.Milliseconds()
+		if event.Error != "" {
+			errorCount++
+		}
+	}
+
+	stats["total_events"] = len(events)
+	stats["event_types"] = typeCount
+	stats["error_count"] = errorCount
+	stats["avg_duration_ms"] = int64(0)
+	if len(events) > 0 {
+		stats["avg_duration_ms"] = totalDuration / int64(len(events))
+	}
+
+	return stats
+}
+
+// get logs
+func (m *Manager) GetLogs(limit int) []LogMessage {
+	return m.logBuffer.GetLogs(limit)
+}
+
+// add log entry
+func (m *Manager) AddLog(level string, message string) {
+	m.logBuffer.AddLog(level, message)
+}
+
+// get log buffer reference
+func (m *Manager) GetLogBuffer() *LogBuffer {
+	return m.logBuffer
+}
+
+// export events to CSV format (heartbeats already filtered from buffer)
+func (m *Manager) ExportEventsToCSV(filename string) error {
+	events := m.eventBuffer.GetAllEvents()
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	if err := writer.Write([]string{"Timestamp", "From", "To", "Type", "Details", "Duration(ms)", "Error"}); err != nil {
+		return fmt.Errorf("failed to write header: %v", err)
+	}
+
+	// Write events
+	for _, event := range events {
+		details := fmt.Sprintf("%v", event.Details)
+		row := []string{
+			event.Timestamp.String(),
+			strconv.Itoa(event.From),
+			strconv.Itoa(event.To),
+			event.Type,
+			details,
+			strconv.Itoa(int(event.Duration.Milliseconds())),
+			event.Error,
+		}
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("failed to write row: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// unregister a node from the cluster
+func (m *Manager) UnregisterNode(nodeID int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.clusterState.Nodes, nodeID)
+}
+
+// StartHealthCheck periodically checks if nodes are still alive
+func (m *Manager) StartHealthCheck(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			m.checkNodeHealth()
+		}
+	}()
+}
+
+func (m *Manager) checkNodeHealth() {
+	m.mu.RLock()
+	nodes := make([]*types.NodeState, 0, len(m.clusterState.Nodes))
+	for _, node := range m.clusterState.Nodes {
+		nodes = append(nodes, node)
+	}
+	m.mu.RUnlock()
+
+	for _, node := range nodes {
+		go func(n *types.NodeState) {
+			if m.pingNode(n) {
+				// Node responded — mark as alive
+				n.IsAlive = true
+				n.LastSeen = time.Now()
+				m.UpdateNodeState(n)
+			} else {
+				// Node didn't respond — mark as dead if it's been down for 30+ seconds
+				if time.Since(n.LastSeen) > 30*time.Second {
+					n.IsAlive = false
+					m.UpdateNodeState(n)
+				}
+			}
+		}(node)
+	}
+}
+
+func (m *Manager) pingNode(node *types.NodeState) bool {
+	client, err := rpc.Dial("tcp", node.RPCAddress)
+	if err != nil {
+		return false
+	}
+	defer client.Close()
+
+	var reply bool
+	err = client.Call("ConsensusRPC.Ping", node.ID, &reply)
+	return err == nil && reply
+}
+
+// start the manager RPC server
+func (m *Manager) Start(address string) {
+	err := managerapi.StartManagerRPCServer(address, m, m.logBuffer)
+	if err != nil {
+		log.Fatalf("Failed to start manager RPC server: %v", err)
+	}
 }

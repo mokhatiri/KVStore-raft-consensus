@@ -20,6 +20,7 @@ type EventFileWriter struct {
 	outputDir string
 	ticker    *time.Ticker
 	eventsCh  <-chan types.RPCEvent
+	logBuffer *LogBuffer
 }
 
 func NewEventBuffer(maxSize int) *EventBuffer {
@@ -29,11 +30,12 @@ func NewEventBuffer(maxSize int) *EventBuffer {
 	}
 }
 
-func NewEventFileWriter(outputDir string, eventsCh <-chan types.RPCEvent) *EventFileWriter {
+func NewEventFileWriter(outputDir string, eventsCh <-chan types.RPCEvent, logBuffer *LogBuffer) *EventFileWriter {
 	return &EventFileWriter{
 		outputDir: outputDir,
 		ticker:    time.NewTicker(EventFlushInterval),
 		eventsCh:  eventsCh,
+		logBuffer: logBuffer,
 	}
 }
 
@@ -73,7 +75,7 @@ func (efw *EventFileWriter) flushToFile(events []types.RPCEvent) {
 	if _, err := os.Stat(efw.outputDir); os.IsNotExist(err) {
 		err := os.MkdirAll(efw.outputDir, 0755)
 		if err != nil {
-			fmt.Printf("Error creating output directory: %v\n", err)
+			efw.logBuffer.AddLog("ERROR", fmt.Sprintf("Error creating output directory: %v", err))
 			return
 		}
 	}
@@ -82,7 +84,7 @@ func (efw *EventFileWriter) flushToFile(events []types.RPCEvent) {
 	filename := fmt.Sprintf("%s/events_%d.log", efw.outputDir, time.Now().Unix())
 	file, err := os.Create(filename)
 	if err != nil {
-		fmt.Printf("Error creating event file: %v\n", err)
+		efw.logBuffer.AddLog("ERROR", fmt.Sprintf("Error creating event file: %v", err))
 		return
 	}
 	defer file.Close()
@@ -93,17 +95,15 @@ func (efw *EventFileWriter) flushToFile(events []types.RPCEvent) {
 		eventData, err := json.Marshal(event)
 
 		if err != nil {
-			fmt.Printf("Error marshaling event: %v\n", err)
+			efw.logBuffer.AddLog("ERROR", fmt.Sprintf("Error marshaling event: %v", err))
 			return
 		}
 		_, err = file.WriteString(fmt.Sprintf("%s\n", eventData))
 		if err != nil {
-			fmt.Printf("Error writing to event file: %v\n", err)
+			efw.logBuffer.AddLog("ERROR", fmt.Sprintf("Error writing to event file: %v", err))
 			return
 		}
 	}
-
-	fmt.Printf("Flushed %d events to file: %s\n", len(events), filename)
 }
 
 func (efw *EventFileWriter) Start() {
@@ -113,7 +113,10 @@ func (efw *EventFileWriter) Start() {
 		for {
 			select {
 			case event := <-efw.eventsCh:
-				batch = append(batch, event) // add event to batch
+				// Skip heartbeat events
+				if !event.IsHeartbeat {
+					batch = append(batch, event) // add event to batch
+				}
 			case <-efw.ticker.C: // when the ticker ticks, flush the batch to a file
 				if len(batch) > 0 {
 					efw.flushToFile(batch)

@@ -1,13 +1,13 @@
 {
   "nodes": [
-    {"id": 1, "rpcAddr": "localhost:8001", "httpAddr": "localhost:9001", "pprofAddr": "localhost:6061"},
-    {"id": 2, "rpcAddr": "localhost:8002", "httpAddr": "localhost:9002", "pprofAddr": "localhost:6062"},
-    {"id": 3, "rpcAddr": "localhost:8003", "httpAddr": "localhost:9003", "pprofAddr": "localhost:6063"}
+    {"id": 1, "rpcAddr": "127.0.0.1:8001", "httpAddr": "127.0.0.1:9001", "pprofAddr": "127.0.0.1:6061"},
+    {"id": 2, "rpcAddr": "127.0.0.1:8002", "httpAddr": "127.0.0.1:9002", "pprofAddr": "127.0.0.1:6062"},
+    {"id": 3, "rpcAddr": "127.0.0.1:8003", "httpAddr": "127.0.0.1:9003", "pprofAddr": "127.0.0.1:6063"}
   ],
   "manager": {
-    "rpcAddr": "localhost:8080",
-    "httpAddr": "localhost:9090",
-    "pprofAddr": "localhost:6060",
+    "rpcAddr": "127.0.0.1:8080",
+    "httpAddr": "127.0.0.1:7090",
+    "pprofAddr": "127.0.0.1:6060",
     "dbPath": "events.db",
     "outputDir": "events_output"
   }
