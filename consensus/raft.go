@@ -813,11 +813,6 @@ func (rc *RaftConsensus) RequestAddServer(nodeID int, rpcAddr string, httpAddr s
 	rc.node.Mu.Lock()
 	rc.node.Log = append(rc.node.Log, entry)
 	rc.persister.SaveState(rc.GetCurrentTerm(), rc.GetVotedFor(), rc.node.Log)
-	rc.node.Mu.Unlock()
-
-	rc.configState.Mu.RUnlock()
-
-	rc.node.Mu.Lock()
 	rc.node.Peers[nodeID] = rpcAddr
 	rc.node.PeersHttp[nodeID] = httpAddr
 	rc.node.Mu.Unlock()

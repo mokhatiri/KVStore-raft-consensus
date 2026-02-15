@@ -38,6 +38,17 @@ func setupTestRaft(t *testing.T, id int) (*types.Node, *RaftConsensus) {
 	node := setupTestNode(id)
 	persister := types.NewPersister(id, tmpDir)
 
+	// Initialize configState similar to NewRaftConsensus
+	configState := &types.ConfigState{
+		OldConfig:    &types.Config{Nodes: make(map[int]string), Index: 0},
+		NewConfig:    nil,
+		InTransition: false,
+		Mu:           sync.RWMutex{},
+	}
+	for peerId := range node.Peers {
+		configState.OldConfig.Nodes[peerId] = node.PeersHttp[peerId]
+	}
+
 	rc := &RaftConsensus{
 		currentTerm:    0,
 		votedFor:       -1,
@@ -50,6 +61,7 @@ func setupTestRaft(t *testing.T, id int) (*types.Node, *RaftConsensus) {
 		node:           node,
 		persister:      persister,
 		logBuffer:      types.NewLogBuffer(100),
+		configState:    configState,
 	}
 	return node, rc
 }
@@ -412,8 +424,8 @@ func TestRequestAddServer(t *testing.T) {
 	node.Role = "Leader"
 	rc.currentTerm = 1
 
-	// Request to add server 2
-	err := rc.RequestAddServer(2, "localhost:8002", "localhost:9002")
+	// Request to add server 4 (not in the initial peer list)
+	err := rc.RequestAddServer(4, "localhost:8004", "localhost:9004")
 	if err != nil {
 		t.Fatalf("RequestAddServer failed: %v", err)
 	}
@@ -436,12 +448,12 @@ func TestRequestAddServer(t *testing.T) {
 		t.Errorf("Expected ConfigChange.Type 'AddServer', got '%s'", lastEntry.ConfigChange.Type)
 	}
 
-	if lastEntry.ConfigChange.NodeID != 2 {
-		t.Errorf("Expected NodeID 2, got %d", lastEntry.ConfigChange.NodeID)
+	if lastEntry.ConfigChange.NodeID != 4 {
+		t.Errorf("Expected NodeID 4, got %d", lastEntry.ConfigChange.NodeID)
 	}
 
-	if lastEntry.ConfigChange.Address != "localhost:8002:localhost:9002" {
-		t.Errorf("Expected Address 'localhost:8002:localhost:9002', got '%s'", lastEntry.ConfigChange.Address)
+	if lastEntry.ConfigChange.Address != "localhost:9004" {
+		t.Errorf("Expected Address 'localhost:9004', got '%s'", lastEntry.ConfigChange.Address)
 	}
 }
 
@@ -504,11 +516,14 @@ func TestFinaliseConfigChange(t *testing.T) {
 	node.Role = "Leader"
 	rc.currentTerm = 1
 
-	// First add a server to set configState
-	_ = rc.RequestAddServer(2, "localhost:8002", "localhost:9002")
+	// First add a server to set configState (using node 4 which is not in the initial config)
+	err := rc.RequestAddServer(4, "localhost:8004", "localhost:9004")
+	if err != nil {
+		t.Fatalf("RequestAddServer failed: %v", err)
+	}
 
 	// Now finalize the config change
-	err := rc.FinaliseConfigChange()
+	err = rc.FinaliseConfigChange()
 	if err != nil {
 		t.Fatalf("FinaliseConfigChange failed: %v", err)
 	}
