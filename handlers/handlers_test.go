@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"strings"
 	"testing"
 
+	"distributed-kv/storage"
 	"distributed-kv/types"
 )
 
@@ -13,6 +15,7 @@ type MockConsensus struct {
 	term     int
 	nodeID   int
 	proposed []string // track proposed commands
+	store    *storage.Store
 }
 
 func (m *MockConsensus) RequestVote(term int, candidateId int, lastLogIndex int, lastLogTerm int) (bool, int) {
@@ -23,10 +26,19 @@ func (m *MockConsensus) AppendEntries(term int, leaderId int, prevLogIndex int, 
 	return nil
 }
 
-func (m *MockConsensus) GetCurrentTerm() int { return m.term }
-func (m *MockConsensus) GetNodeID() int      { return m.nodeID }
-func (m *MockConsensus) GetVotedFor() int    { return -1 }
-func (m *MockConsensus) GetRole() string     { return m.role }
+func (m *MockConsensus) GetCurrentTerm() int          { return m.term }
+func (m *MockConsensus) GetNodeID() int               { return m.nodeID }
+func (m *MockConsensus) GetVotedFor() int             { return -1 }
+func (m *MockConsensus) GetRole() string              { return m.role }
+func (m *MockConsensus) GetStore() any                { return m.store }
+func (m *MockConsensus) GetSnapshot() *types.Snapshot { return nil }
+func (m *MockConsensus) InstallSnapshot(term int, leaderId int, lastIncludedIndex int, lastIncludedTerm int, data map[string]any) (int, error) {
+	return 0, nil
+}
+func (m *MockConsensus) RequestAddServer(nodeID int, rpcaddress string, httpaddress string) error {
+	return nil
+}
+func (m *MockConsensus) RequestRemoveServer(nodeID int) error { return nil }
 
 func (m *MockConsensus) GetNodeStatus() (int, string, int, int) {
 	return m.nodeID, m.role, 0, 0
@@ -40,14 +52,23 @@ func (m *MockConsensus) Propose(command string) (int, int, bool) {
 	return len(m.proposed), m.term, true
 }
 
-func (m *MockConsensus) EmitRPCEvent(event types.RPCEvent) {}
+func (m *MockConsensus) IsLeader() bool {
+	return m.role == "Leader"
+}
+
+func (m *MockConsensus) GetLeader() (int, string) {
+	if m.role == "Leader" {
+		return m.nodeID, "localhost:9000"
+	}
+	return 1, "localhost:9001" // Assume node 1 is leader by default
+}
 
 // ==============================
 // SetHandler
 // ==============================
 
 func TestSetHandlerAsLeader(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1, store: storage.NewStore()}
 
 	_, err := SetHandler(mock, "name", "alice")
 	if err != nil {
@@ -64,7 +85,7 @@ func TestSetHandlerAsLeader(t *testing.T) {
 }
 
 func TestSetHandlerAsFollower(t *testing.T) {
-	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2}
+	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2, store: storage.NewStore()}
 
 	_, err := SetHandler(mock, "name", "alice")
 	if err == nil {
@@ -77,7 +98,7 @@ func TestSetHandlerAsFollower(t *testing.T) {
 }
 
 func TestSetHandlerAsCandidate(t *testing.T) {
-	mock := &MockConsensus{role: "Candidate", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: "Candidate", term: 1, nodeID: 1, store: storage.NewStore()}
 
 	_, err := SetHandler(mock, "key", "value")
 	if err == nil {
@@ -90,7 +111,7 @@ func TestSetHandlerAsCandidate(t *testing.T) {
 // ==============================
 
 func TestDeleteHandlerAsLeader(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 2, nodeID: 1}
+	mock := &MockConsensus{role: "Leader", term: 2, nodeID: 1, store: storage.NewStore()}
 
 	_, err := DeleteHandler(mock, "mykey")
 	if err != nil {
@@ -107,7 +128,7 @@ func TestDeleteHandlerAsLeader(t *testing.T) {
 }
 
 func TestDeleteHandlerAsFollower(t *testing.T) {
-	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2}
+	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2, store: storage.NewStore()}
 
 	_, err := DeleteHandler(mock, "mykey")
 	if err == nil {
@@ -124,7 +145,7 @@ func TestDeleteHandlerAsFollower(t *testing.T) {
 // ==============================
 
 func TestCleanHandlerAsLeader(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1, store: storage.NewStore()}
 
 	_, err := CleanHandler(mock)
 	if err != nil {
@@ -140,7 +161,7 @@ func TestCleanHandlerAsLeader(t *testing.T) {
 }
 
 func TestCleanHandlerAsFollower(t *testing.T) {
-	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3}
+	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3, store: storage.NewStore()}
 
 	_, err := CleanHandler(mock)
 	if err == nil {
@@ -169,5 +190,91 @@ func TestMultipleProposals(t *testing.T) {
 		if mock.proposed[i] != expected {
 			t.Errorf("Command %d: expected '%s', got '%s'", i, expected, mock.proposed[i])
 		}
+	}
+}
+
+// ==============================
+// AddServerHandler
+// ==============================
+
+func TestAddServerHandlerAsLeader(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1, store: storage.NewStore()}
+
+	msg, err := AddServerHandler(mock, 2, "localhost:9002", "localhost:8002")
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if msg == "" {
+		t.Fatal("Expected success message")
+	}
+
+	if !strings.Contains(msg, "node 2") {
+		t.Errorf("Expected message to contain 'node 2', got: %s", msg)
+	}
+}
+
+func TestAddServerHandlerAsFollower(t *testing.T) {
+	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3, store: storage.NewStore()}
+
+	_, err := AddServerHandler(mock, 2, "localhost:9002", "localhost:8002")
+	if err == nil {
+		t.Fatal("Expected error for non-leader, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "leader") {
+		t.Errorf("Expected error to mention 'leader', got: %v", err)
+	}
+}
+
+func TestAddServerHandlerAsCandidate(t *testing.T) {
+	mock := &MockConsensus{role: "Candidate", term: 1, nodeID: 1, store: storage.NewStore()}
+
+	_, err := AddServerHandler(mock, 2, "localhost:9002", "localhost:8002")
+	if err == nil {
+		t.Fatal("Expected error for non-leader candidate, got nil")
+	}
+}
+
+// ==============================
+// RemoveServerHandler
+// ==============================
+
+func TestRemoveServerHandlerAsLeader(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1, store: storage.NewStore()}
+
+	msg, err := RemoveServerHandler(mock, 2)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if msg == "" {
+		t.Fatal("Expected success message")
+	}
+
+	if !strings.Contains(msg, "node 2") {
+		t.Errorf("Expected message to contain 'node 2', got: %s", msg)
+	}
+}
+
+func TestRemoveServerHandlerAsFollower(t *testing.T) {
+	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3, store: storage.NewStore()}
+
+	_, err := RemoveServerHandler(mock, 2)
+	if err == nil {
+		t.Fatal("Expected error for non-leader, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "leader") {
+		t.Errorf("Expected error to mention 'leader', got: %v", err)
+	}
+}
+
+func TestRemoveServerHandlerAsCandidate(t *testing.T) {
+	mock := &MockConsensus{role: "Candidate", term: 1, nodeID: 1, store: storage.NewStore()}
+
+	_, err := RemoveServerHandler(mock, 2)
+	if err == nil {
+		t.Fatal("Expected error for non-leader candidate, got nil")
 	}
 }

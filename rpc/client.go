@@ -9,14 +9,11 @@ import (
 	"distributed-kv/types"
 )
 
-func SendRequestVote(address string, term int, candidateId int, lastLogIndex int, lastLogTerm int, nodeID int, rpcEventCh chan<- types.RPCEvent) (succ bool, new_term int, err error) {
-	startTime := time.Now()
+func SendRequestVote(address string, term int, candidateId int, lastLogIndex int, lastLogTerm int, nodeID int, peerID int) (succ bool, new_term int, err error) {
 
-	// wrap to emit an event to the rpc channel
 	// connect to the RPC server with timeout
 	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
 	if err != nil {
-		// Don't emit events for connection errors - they're expected when nodes are down
 		return false, 0, err
 	}
 	defer conn.Close()
@@ -41,24 +38,6 @@ func SendRequestVote(address string, term int, candidateId int, lastLogIndex int
 
 	select {
 	case err := <-done:
-		duration := time.Since(startTime)
-
-		// Emit an event for the completed RPC call
-		if rpcEventCh != nil {
-			errStr := ""
-			if err != nil {
-				errStr = err.Error()
-			}
-			rpcEventCh <- types.EmitRequestVoteEvent(
-				nodeID,
-				reply.Term,
-				types.RequestVoteArgs{Term: term, CandidateID: candidateId, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm},
-				reply,
-				duration,
-				errStr,
-			)
-		}
-
 		if err != nil {
 			return false, 0, err
 		}
@@ -66,29 +45,15 @@ func SendRequestVote(address string, term int, candidateId int, lastLogIndex int
 		return reply.VoteGranted, reply.Term, nil
 
 	case <-time.After(1 * time.Second):
-		duration := time.Since(startTime)
-
-		if rpcEventCh != nil {
-			rpcEventCh <- types.EmitRequestVoteEvent(
-				nodeID,
-				0,
-				types.RequestVoteArgs{Term: term, CandidateID: candidateId, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm},
-				types.RequestVoteReply{VoteGranted: false, Term: 0},
-				duration,
-				"RPC call timed out",
-			)
-		}
 		return false, 0, fmt.Errorf("RPC call timed out")
 	}
 }
 
-func SendAppendEntries(address string, term int, leaderId int, prevLogIndex int, prevLogTerm int, leaderCommit int, entries []types.LogEntry, nodeID int, followerID int, rpcEventCh chan<- types.RPCEvent) (success bool, new_term int, err error) {
-	startTime := time.Now()
+func SendAppendEntries(address string, term int, leaderId int, prevLogIndex int, prevLogTerm int, leaderCommit int, entries []types.LogEntry, nodeID int, followerID int) (success bool, new_term int, err error) {
 
 	// connect to the RPC server with timeout
 	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
 	if err != nil {
-		// Don't emit events for connection errors - they're expected when nodes are down
 		return false, 0, fmt.Errorf("RPC connection failed")
 	}
 	defer conn.Close()
@@ -115,23 +80,6 @@ func SendAppendEntries(address string, term int, leaderId int, prevLogIndex int,
 
 	select {
 	case err := <-done:
-		duration := time.Since(startTime)
-
-		// Emit an event for the completed RPC call
-		if rpcEventCh != nil {
-			errStr := ""
-			if err != nil {
-				errStr = err.Error()
-			}
-			rpcEventCh <- types.EmitAppendEntriesEvent(
-				nodeID,
-				followerID,
-				types.AppendEntriesArgs{Term: term, LeaderID: leaderId, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, LeaderCommit: leaderCommit, Entries: entries},
-				reply,
-				duration,
-				errStr,
-			)
-		}
 
 		if err != nil {
 			return false, 0, err
@@ -139,64 +87,45 @@ func SendAppendEntries(address string, term int, leaderId int, prevLogIndex int,
 		return reply.Success, reply.Term, nil
 
 	case <-time.After(1 * time.Second):
-		duration := time.Since(startTime)
-
-		if rpcEventCh != nil {
-			rpcEventCh <- types.EmitAppendEntriesEvent(
-				nodeID,
-				0,
-				types.AppendEntriesArgs{Term: term, LeaderID: leaderId, PrevLogIndex: prevLogIndex, PrevLogTerm: prevLogTerm, LeaderCommit: leaderCommit, Entries: entries},
-				types.AppendEntriesReply{Success: false, Term: 0},
-				duration,
-				"RPC call timed out",
-			)
-		}
 		return false, 0, fmt.Errorf("RPC call timed out")
 	}
 }
 
-func SendNodeStateToManager(address string, state types.NodeState) error {
-	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
+// SendInstallSnapshot sends a snapshot to a follower that is too far behind
+func SendInstallSnapshot(address string, term int, leaderId int, lastIncludedIndex int, lastIncludedTerm int, data map[string]any, nodeID int, followerID int) (replyTerm int, err error) {
+
+	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 	if err != nil {
-		return fmt.Errorf("failed to connect to manager: %v", err)
+		return 0, fmt.Errorf("RPC connection failed")
 	}
 	defer conn.Close()
 
 	client := rpc.NewClient(conn)
 	defer client.Close()
 
-	var reply bool
-	err = client.Call("ManagerServer.ReceiveNodeState", &state, &reply)
-	if err != nil {
-		return fmt.Errorf("failed to send node state to manager: %v", err)
+	args := &types.InstallSnapshotArgs{
+		Term:              term,
+		LeaderID:          leaderId,
+		LastIncludedIndex: lastIncludedIndex,
+		LastIncludedTerm:  lastIncludedTerm,
+		Data:              data,
 	}
+	var reply types.InstallSnapshotReply
 
-	if !reply {
-		return fmt.Errorf("manager failed to process node state: %v", reply)
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Call("RaftServer.InstallSnapshot", args, &reply)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return 0, err
+		}
+		return reply.Term, nil
+
+	case <-time.After(5 * time.Second):
+		// Snapshots can be large, allow longer timeout
+		return 0, fmt.Errorf("InstallSnapshot RPC timed out")
 	}
-
-	return nil
-}
-
-func SendRPCEventToManager(address string, event types.RPCEvent) error {
-	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
-	if err != nil {
-		return fmt.Errorf("failed to connect to manager at %s: %v", address, err)
-	}
-	defer conn.Close()
-
-	client := rpc.NewClient(conn)
-	defer client.Close()
-
-	var reply bool
-	err = client.Call("ManagerServer.ReceiveRPCEvent", &event, &reply)
-	if err != nil {
-		return fmt.Errorf("failed to send RPC event to manager: %v", err)
-	}
-
-	if !reply {
-		return fmt.Errorf("manager failed to process RPC event")
-	}
-
-	return nil
 }

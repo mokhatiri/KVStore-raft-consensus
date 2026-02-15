@@ -9,16 +9,10 @@ import (
 	"time"
 )
 
-// --- Mock Logger ---
-type MockLogger struct{}
-
-func (l *MockLogger) AddLog(level string, message string) {}
-
 // --- Mock Manager ---
 
 type MockManager struct {
 	clusterState *types.ClusterState
-	events       []types.RPCEvent
 }
 
 func newMockManager() *MockManager {
@@ -27,23 +21,14 @@ func newMockManager() *MockManager {
 			Leader:      1,
 			CurrentTerm: 3,
 			Nodes: map[int]*types.NodeState{
-				1: {ID: 1, Role: "Leader", Term: 3, RPCAddress: "localhost:8001", HTTPAddress: "localhost:9001", IsAlive: true, LastSeen: time.Now()},
-				2: {ID: 2, Role: "Follower", Term: 3, RPCAddress: "localhost:8002", HTTPAddress: "localhost:9002", IsAlive: true, LastSeen: time.Now()},
+				1: {ID: 1, Role: "Leader", Term: 3, HTTPAddress: "localhost:9001", IsAlive: true, LastSeen: time.Now()},
+				2: {ID: 2, Role: "Follower", Term: 3, HTTPAddress: "localhost:9002", IsAlive: true, LastSeen: time.Now()},
 			},
 			ReplicationProgress: map[int]map[int]int{
 				1: {2: 5},
 			},
 		},
-		events: []types.RPCEvent{
-			types.NewRPCEvent(1, 2, "AppendEntries", "", 5*time.Millisecond, ""),
-			types.NewRPCEvent(2, 1, "RequestVote", "", 3*time.Millisecond, ""),
-		},
 	}
-}
-
-func (m *MockManager) SaveEvent(args types.RPCEvent) error {
-	m.events = append(m.events, args)
-	return nil
 }
 
 func (m *MockManager) UpdateNodeState(args *types.NodeState) error {
@@ -55,18 +40,15 @@ func (m *MockManager) GetClusterState() *types.ClusterState {
 	return m.clusterState
 }
 
-func (m *MockManager) GetEvents(limit int) []types.RPCEvent {
-	if limit > len(m.events) {
-		limit = len(m.events)
-	}
-	return m.events[len(m.events)-limit:]
-}
+// ==============================
+// Cluster Status Handler
+// ==============================
 
 // --- Tests ---
 
 func TestHandleClusterStatus(t *testing.T) {
 	mock := newMockManager()
-	server := NewManagerServer(":0", mock, &MockLogger{})
+	server := NewManagerServer(":0", mock, &types.LogBuffer{})
 
 	req := httptest.NewRequest(http.MethodGet, "/cluster/status", nil)
 	w := httptest.NewRecorder()
@@ -98,47 +80,9 @@ func TestHandleClusterStatus(t *testing.T) {
 		t.Errorf("Expected 2 total nodes, got %v", result["totalNodes"])
 	}
 }
-
-func TestHandleClusterEvents(t *testing.T) {
-	mock := newMockManager()
-	server := NewManagerServer(":0", mock, &MockLogger{})
-
-	t.Run("default limit", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/cluster/events", nil)
-		w := httptest.NewRecorder()
-
-		err := server.handleClusterEvents(w, req)
-		if err != nil {
-			t.Fatalf("handleClusterEvents returned error: %v", err)
-		}
-
-		var result map[string]any
-		json.Unmarshal(w.Body.Bytes(), &result)
-		if result["count"].(float64) != 2 {
-			t.Errorf("Expected 2 events, got %v", result["count"])
-		}
-	})
-
-	t.Run("with limit", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/cluster/events?limit=1", nil)
-		w := httptest.NewRecorder()
-
-		err := server.handleClusterEvents(w, req)
-		if err != nil {
-			t.Fatalf("handleClusterEvents returned error: %v", err)
-		}
-
-		var result map[string]any
-		json.Unmarshal(w.Body.Bytes(), &result)
-		if result["count"].(float64) != 1 {
-			t.Errorf("Expected 1 event, got %v", result["count"])
-		}
-	})
-}
-
 func TestHandleClusterNodes(t *testing.T) {
 	mock := newMockManager()
-	server := NewManagerServer(":0", mock, &MockLogger{})
+	server := NewManagerServer(":0", mock, &types.LogBuffer{})
 
 	req := httptest.NewRequest(http.MethodGet, "/cluster/nodes", nil)
 	w := httptest.NewRecorder()
@@ -157,7 +101,7 @@ func TestHandleClusterNodes(t *testing.T) {
 
 func TestMethodNotAllowed(t *testing.T) {
 	mock := newMockManager()
-	server := NewManagerServer(":0", mock, &MockLogger{})
+	server := NewManagerServer(":0", mock, &types.LogBuffer{})
 	server.Start()
 	defer server.Stop()
 

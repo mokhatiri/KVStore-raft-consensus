@@ -1,4 +1,4 @@
-package clustermanager
+package types
 
 import (
 	"sync"

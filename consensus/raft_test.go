@@ -1,9 +1,9 @@
 package consensus
 
 import (
-	"distributed-kv/clustermanager"
 	"distributed-kv/types"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,10 +15,12 @@ func setupTestNode(id int) *types.Node {
 	node := &types.Node{
 		ID:        id,
 		Address:   "localhost:8000",
-		Peers:     []string{"localhost:8001", "localhost:8002"},
+		Peers:     map[int]string{1: "localhost:8001", 2: "localhost:8002"},
+		PeersHttp: map[int]string{1: "localhost:9001", 2: "localhost:9002"},
 		Role:      "Follower",
 		Log:       []types.LogEntry{},
 		CommitIdx: 0,
+		Mu:        sync.RWMutex{},
 	}
 	return node
 }
@@ -40,15 +42,14 @@ func setupTestRaft(t *testing.T, id int) (*types.Node, *RaftConsensus) {
 		currentTerm:    0,
 		votedFor:       -1,
 		lastApplied:    0,
-		nextIndex:      make([]int, len(node.Peers)),
-		matchIndex:     make([]int, len(node.Peers)),
+		nextIndex:      make(map[int]int),
+		matchIndex:     make(map[int]int),
 		applyCh:        make(chan types.ApplyMsg),
 		electionTimer:  time.NewTimer(GetRandomElectionTimeout()),
 		heartbeatTimer: time.NewTimer(HeartbeatIntervalMs * time.Millisecond),
 		node:           node,
 		persister:      persister,
-		logBuffer:      clustermanager.NewLogBuffer(100),
-		rpcEventCh:     make(chan types.RPCEvent, 100),
+		logBuffer:      types.NewLogBuffer(100),
 	}
 	return node, rc
 }
@@ -196,7 +197,7 @@ func TestRaftConsensusInitialization(t *testing.T) {
 	}
 }
 
-/* --- New tests for Propose, getters, EmitRPCEvent, AppendEntries edge cases --- */
+/* --- New tests for Propose, getters, AppendEntries edge cases --- */
 
 func TestProposeAsLeader(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
@@ -234,8 +235,8 @@ func TestProposeAsLeader(t *testing.T) {
 	if entry.Value != "myvalue" {
 		t.Errorf("Expected value 'myvalue', got '%v'", entry.Value)
 	}
-	if entry.Command != "SET:mykey:myvalue" {
-		t.Errorf("Expected command 'SET:mykey:myvalue', got '%s'", entry.Command)
+	if entry.Command != "SET" {
+		t.Errorf("Expected command 'SET', got '%s'", entry.Command)
 	}
 }
 
@@ -330,47 +331,13 @@ func TestGetNodeID(t *testing.T) {
 	}
 }
 
-func TestEmitRPCEvent(t *testing.T) {
-	_, rc := setupTestRaft(t, 1)
-
-	event := types.NewRPCEvent(1, 2, "RequestVote", "", 0, "")
-	rc.EmitRPCEvent(event)
-
-	// Read from channel
-	ch := rc.GetRPCEventsCh()
-	select {
-	case received := <-ch:
-		if received.From != 1 || received.To != 2 {
-			t.Errorf("Event mismatch: from=%d to=%d", received.From, received.To)
-		}
-		if received.Type != "RequestVote" {
-			t.Errorf("Expected type 'RequestVote', got '%s'", received.Type)
-		}
-	default:
-		t.Errorf("Expected event on channel, got none")
-	}
-}
-
-func TestEmitRPCEventChannelFull(t *testing.T) {
-	_, rc := setupTestRaft(t, 1)
-
-	// Fill the channel (buffer size is 100)
-	for i := 0; i < 100; i++ {
-		rc.EmitRPCEvent(types.NewRPCEvent(1, 2, "test", "", 0, ""))
-	}
-
-	// This should not block — event gets dropped
-	rc.EmitRPCEvent(types.NewRPCEvent(1, 2, "dropped", "", 0, ""))
-	// If we reach here without hanging, the test passes
-}
-
 func TestAppendEntriesUpdatesCommitIndex(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
 
 	// First append some entries
 	entries := []types.LogEntry{
-		{Term: 1, Command: "SET:k1:v1", Key: "k1", Value: "v1"},
-		{Term: 1, Command: "SET:k2:v2", Key: "k2", Value: "v2"},
+		{Term: 1, Command: "SET", Key: "k1", Value: "v1"},
+		{Term: 1, Command: "SET", Key: "k2", Value: "v2"},
 	}
 	err := rc.AppendEntries(1, 2, 0, 0, 0, entries)
 	if err != nil {
@@ -420,7 +387,7 @@ func TestRequestVoteLogCompleteness(t *testing.T) {
 
 	// Give the node a log entry at term 2
 	node.Mu.Lock()
-	node.Log = append(node.Log, types.LogEntry{Term: 2, Command: "SET:k:v", Key: "k", Value: "v"})
+	node.Log = append(node.Log, types.LogEntry{Term: 2, Command: "SET", Key: "k", Value: "v"})
 	node.Mu.Unlock()
 
 	// A candidate with an older log should be denied
@@ -433,5 +400,144 @@ func TestRequestVoteLogCompleteness(t *testing.T) {
 	granted2, _ := rc.RequestVote(3, 3, 1, 2) // lastLogTerm=2 matches
 	if !granted2 {
 		t.Errorf("Expected vote granted: candidate's log is at least as up-to-date")
+	}
+}
+
+// ==============================
+// Joint Consensus - Config Changes
+// ==============================
+
+func TestRequestAddServer(t *testing.T) {
+	node, rc := setupTestRaft(t, 1)
+	node.Role = "Leader"
+	rc.currentTerm = 1
+
+	// Request to add server 2
+	err := rc.RequestAddServer(2, "localhost:8002", "localhost:9002")
+	if err != nil {
+		t.Fatalf("RequestAddServer failed: %v", err)
+	}
+
+	// Check that a log entry was created with CONFIG_CHANGE command
+	if len(node.Log) == 0 {
+		t.Fatal("Expected log entry to be created")
+	}
+
+	lastEntry := node.Log[len(node.Log)-1]
+	if lastEntry.Command != "CONFIG_CHANGE" {
+		t.Errorf("Expected command 'CONFIG_CHANGE', got '%s'", lastEntry.Command)
+	}
+
+	if lastEntry.ConfigChange == nil {
+		t.Fatal("Expected ConfigChange field to be set")
+	}
+
+	if lastEntry.ConfigChange.Type != "AddServer" {
+		t.Errorf("Expected ConfigChange.Type 'AddServer', got '%s'", lastEntry.ConfigChange.Type)
+	}
+
+	if lastEntry.ConfigChange.NodeID != 2 {
+		t.Errorf("Expected NodeID 2, got %d", lastEntry.ConfigChange.NodeID)
+	}
+
+	if lastEntry.ConfigChange.Address != "localhost:8002:localhost:9002" {
+		t.Errorf("Expected Address 'localhost:8002:localhost:9002', got '%s'", lastEntry.ConfigChange.Address)
+	}
+}
+
+func TestRequestAddServerNotLeader(t *testing.T) {
+	node, rc := setupTestRaft(t, 1)
+	node.Role = "Follower" // Not leader
+
+	err := rc.RequestAddServer(2, "localhost:8002", "localhost:9002")
+	if err == nil {
+		t.Fatal("Expected error when not leader")
+	}
+}
+
+func TestRequestRemoveServer(t *testing.T) {
+	node, rc := setupTestRaft(t, 1)
+	node.Role = "Leader"
+	rc.currentTerm = 1
+
+	// Request to remove server 2
+	err := rc.RequestRemoveServer(2)
+	if err != nil {
+		t.Fatalf("RequestRemoveServer failed: %v", err)
+	}
+
+	// Check that a log entry was created with CONFIG_CHANGE command
+	if len(node.Log) == 0 {
+		t.Fatal("Expected log entry to be created")
+	}
+
+	lastEntry := node.Log[len(node.Log)-1]
+	if lastEntry.Command != "CONFIG_CHANGE" {
+		t.Errorf("Expected command 'CONFIG_CHANGE', got '%s'", lastEntry.Command)
+	}
+
+	if lastEntry.ConfigChange == nil {
+		t.Fatal("Expected ConfigChange field to be set")
+	}
+
+	if lastEntry.ConfigChange.Type != "RemoveServer" {
+		t.Errorf("Expected ConfigChangeType 'RemoveServer', got '%s'", lastEntry.ConfigChange.Type)
+	}
+
+	if lastEntry.ConfigChange.NodeID != 2 {
+		t.Errorf("Expected NodeID 2, got %d", lastEntry.ConfigChange.NodeID)
+	}
+}
+
+func TestRequestRemoveServerNotLeader(t *testing.T) {
+	node, rc := setupTestRaft(t, 1)
+	node.Role = "Follower" // Not leader
+
+	err := rc.RequestRemoveServer(2)
+	if err == nil {
+		t.Fatal("Expected error when not leader")
+	}
+}
+
+func TestFinaliseConfigChange(t *testing.T) {
+	node, rc := setupTestRaft(t, 1)
+	node.Role = "Leader"
+	rc.currentTerm = 1
+
+	// First add a server to set configState
+	_ = rc.RequestAddServer(2, "localhost:8002", "localhost:9002")
+
+	// Now finalize the config change
+	err := rc.FinaliseConfigChange()
+	if err != nil {
+		t.Fatalf("FinaliseConfigChange failed: %v", err)
+	}
+
+	// Check that a finalize entry was created
+	if len(node.Log) < 2 {
+		t.Fatal("Expected at least 2 log entries (add + finalize)")
+	}
+
+	finalEntry := node.Log[len(node.Log)-1]
+	if finalEntry.Command != "CONFIG_CHANGE" {
+		t.Errorf("Expected command 'CONFIG_CHANGE', got '%s'", finalEntry.Command)
+	}
+
+	if finalEntry.ConfigChange == nil {
+		t.Fatal("Expected ConfigChange field to be set")
+	}
+
+	if finalEntry.ConfigChange.Type != "FinalizeConfig" {
+		t.Errorf("Expected ConfigChangeType 'FinalizeConfig', got '%s'", finalEntry.ConfigChange.Type)
+	}
+}
+
+func TestFinaliseConfigChangeNotLeader(t *testing.T) {
+	node, rc := setupTestRaft(t, 1)
+	node.Role = "Follower" // Not leader
+
+	err := rc.FinaliseConfigChange()
+	if err == nil {
+		t.Fatal("Expected error when not leader")
 	}
 }

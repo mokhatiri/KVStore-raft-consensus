@@ -5,10 +5,7 @@
     {"id": 3, "rpcAddr": "127.0.0.1:8003", "httpAddr": "127.0.0.1:9003", "pprofAddr": "127.0.0.1:6063"}
   ],
   "manager": {
-    "rpcAddr": "127.0.0.1:8080",
-    "httpAddr": "127.0.0.1:7090",
-    "pprofAddr": "127.0.0.1:6060",
-    "dbPath": "events.db",
-    "outputDir": "events_output"
+    "httpAddr": "127.0.0.1:8080",
+    "pprofAddr": "127.0.0.1:6060"
   }
 }

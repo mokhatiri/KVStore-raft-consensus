@@ -13,13 +13,11 @@ import (
 
 type Handling struct {
 	consensus *consensus.RaftConsensus
-	store     *storage.Store
 }
 
-func NewHandling(consensus *consensus.RaftConsensus, store *storage.Store) *Handling {
+func NewHandling(consensus *consensus.RaftConsensus) *Handling {
 	return &Handling{
 		consensus: consensus,
-		store:     store,
 	}
 }
 
@@ -31,7 +29,8 @@ func (h *Handling) HandleGet(parts []string) {
 
 	key := parts[1]
 
-	value, exists := h.store.Get(key)
+	store := h.consensus.GetStore().(*storage.Store)
+	value, exists := store.Get(key)
 	if !exists {
 		fmt.Printf("Key '%s' not found\n", key)
 		return
@@ -75,7 +74,8 @@ func (h *Handling) HandleDelete(parts []string) {
 }
 
 func (h *Handling) HandleAll() {
-	data := h.store.GetAll()
+	store := h.consensus.GetStore().(*storage.Store)
+	data := store.GetAll()
 	if len(data) == 0 {
 		fmt.Println("Store is empty")
 		return

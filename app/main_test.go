@@ -27,30 +27,33 @@ func TestMainIntegration(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		// Create node
-		nodes[i] = &types.Node{
-			ID:        i + 1,
-			Address:   peerAddresses[i],
-			Peers:     make([]string, 0),
-			PeerIDs:   make([]int, 0),
-			Role:      "Follower",
-			Log:       []types.LogEntry{},
-			CommitIdx: 0,
-		}
+		// Create node with maps for peers and HTTP peers
+		peers := make(map[int]string)
+		peersHttp := make(map[int]string)
 
 		// Add other nodes as peers
 		for j := 0; j < 3; j++ {
 			if i != j {
-				nodes[i].Peers = append(nodes[i].Peers, peerAddresses[j])
-				nodes[i].PeerIDs = append(nodes[i].PeerIDs, j+1) // Node IDs are 1, 2, 3
+				peers[j+1] = peerAddresses[j]
+				peersHttp[j+1] = peerAddresses[j]
 			}
+		}
+
+		nodes[i] = &types.Node{
+			ID:        i + 1,
+			Address:   peerAddresses[i],
+			Peers:     peers,
+			PeersHttp: peersHttp,
+			Role:      "Follower",
+			Log:       []types.LogEntry{},
+			CommitIdx: 0,
 		}
 
 		// Create storage
 		stores[i] = storage.NewStore()
 
 		// Create consensus engine
-		consensusEngines[i] = consensus.NewRaftConsensus(nodes[i])
+		consensusEngines[i] = consensus.NewRaftConsensus(nodes[i], stores[i], nil)
 	}
 
 	// Test 1: Verify nodes are initialized correctly
@@ -259,13 +262,15 @@ func TestNodeStartup(t *testing.T) {
 	node := &types.Node{
 		ID:        1,
 		Address:   "localhost:8000",
-		Peers:     []string{"localhost:8001"},
+		Peers:     map[int]string{1: "localhost:8001"},
+		PeersHttp: map[int]string{1: "localhost:9001"},
 		Role:      "Follower",
 		Log:       []types.LogEntry{},
 		CommitIdx: 0,
 	}
 
-	rc := consensus.NewRaftConsensus(node)
+	store := storage.NewStore()
+	rc := consensus.NewRaftConsensus(node, store, nil)
 
 	if rc == nil {
 		t.Fatal("Failed to create RaftConsensus")

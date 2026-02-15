@@ -7,9 +7,10 @@ import (
 )
 
 const (
-	ElectionTimeoutMinMs = 150 // minimum milliseconds before election triggered
-	ElectionTimeoutMaxMs = 300 // maximum milliseconds before election triggered
-	HeartbeatIntervalMs  = 50  // milliseconds between leader heartbeats
+	ElectionTimeoutMinMs = 150  // minimum milliseconds before election triggered
+	ElectionTimeoutMaxMs = 300  // maximum milliseconds before election triggered
+	HeartbeatIntervalMs  = 50   // milliseconds between leader heartbeats
+	SnapshotThreshold    = 1000 // number of applied entries before taking a snapshot
 )
 
 // GetRandomElectionTimeout returns a random election timeout between min and max

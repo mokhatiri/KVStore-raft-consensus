@@ -2,10 +2,8 @@ package managercli
 
 import (
 	"distributed-kv/clustermanager"
-	"distributed-kv/types"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,14 +26,12 @@ func (h *Handling) HandleCommand(input string) {
 	/*
 		Commands:
 		  cluster status - Show cluster status (leader ID, term, live nodes, replication status)
-		  events [list [limit]|filter <type>|stats|export <file>] - Show/filter/analyze cluster RPC events
 		  nodes list - Show status of all nodes in the cluster
 		  node status <nodeID> - Show detailed status of a specific node
 		  node register <nodeID> <RPCAddress> <HTTPAddress> - Register a new node
 		  node unregister <nodeID> - Unregister a node
 		  health check - Perform health check on all nodes
 		  replication status - Show replication status (match/next indices) for all followers
-		  latency stats - Show latency statistics for RPC events
 		  log [limit] - Show manager logs (errors, info, warnings)
 		  help - Show this help message
 		  clear - Clear the console
@@ -55,14 +51,6 @@ func (h *Handling) HandleCommand(input string) {
 		default:
 			fmt.Println("Unknown cluster command. Available: status")
 		}
-
-	case "events":
-		if len(parts) < 2 {
-			fmt.Println("Usage: events <subcommand> [args]")
-			return
-		}
-		subcommand := parts[1:]
-		h.HandleEvents(subcommand)
 
 	case "nodes":
 		if len(parts) < 2 || parts[1] != "list" {
@@ -92,13 +80,6 @@ func (h *Handling) HandleCommand(input string) {
 			return
 		}
 		h.HandleReplicationStatus()
-
-	case "latency":
-		if len(parts) < 2 || parts[1] != "stats" {
-			fmt.Println("Usage: latency stats")
-			return
-		}
-		h.HandleLatencyStats()
 
 	case "log":
 		limit := 20 // default
@@ -155,69 +136,6 @@ func (h *Handling) HandleClusterStatus() {
 	}
 }
 
-func (h *Handling) HandleEvents(args []string) {
-	if len(args) == 0 {
-		// Default: show last 20 events
-		events := h.manager.GetEvents(20)
-		h.printEvents(events)
-		return
-	}
-
-	subcommand := args[0]
-
-	switch subcommand {
-	case "list":
-		limit := 20
-		if len(args) > 1 {
-			if l, err := strconv.Atoi(args[1]); err == nil {
-				limit = l
-			}
-		}
-		events := h.manager.GetEvents(limit)
-		h.printEvents(events)
-
-	case "filter":
-		if len(args) < 2 {
-			fmt.Println("Usage: events filter <type>")
-			return
-		}
-		eventType := args[1]
-		p := getEventPredicate(eventType)
-		if p == nil {
-			fmt.Printf("Invalid event type: %s\n", eventType)
-			return
-		}
-		events := h.manager.GetAllEvents()
-		var filtered []types.RPCEvent
-		for _, event := range events {
-			if p(event) {
-				filtered = append(filtered, event)
-			}
-		}
-		h.printEvents(filtered)
-
-	case "stats":
-		stats := h.manager.GetEventStats()
-		h.printEventStats(stats)
-
-	case "export":
-		if len(args) < 2 {
-			fmt.Println("Usage: events export <file>")
-			return
-		}
-		filename := args[1]
-		err := h.manager.ExportEventsToCSV(filename)
-		if err != nil {
-			fmt.Printf("Error exporting events: %v\n", err)
-			return
-		}
-		fmt.Printf("Events exported to %s\n", filename)
-
-	default:
-		fmt.Println("Usage: events <list [limit]|filter <type>|stats|export <file>>")
-	}
-}
-
 func (h *Handling) HandleNode(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: node <status|register|unregister> [args]")
@@ -241,7 +159,7 @@ func (h *Handling) HandleNode(args []string) {
 
 	case "register":
 		if len(args) < 4 {
-			fmt.Println("Usage: node register <nodeID> <RPCAddress> <HTTPAddress>")
+			fmt.Println("Usage: node register <nodeID> <HTTPAddress>")
 			return
 		}
 		nodeID, err := strconv.Atoi(args[1])
@@ -249,10 +167,9 @@ func (h *Handling) HandleNode(args []string) {
 			fmt.Println("Invalid node ID")
 			return
 		}
-		rpcAddr := args[2]
 		httpAddr := args[3]
-		h.manager.RegisterNode(nodeID, rpcAddr, httpAddr)
-		fmt.Printf("Node %d registered with RPC Address: %s, HTTP Address: %s\n", nodeID, rpcAddr, httpAddr)
+		h.manager.RegisterNode(nodeID, httpAddr)
+		fmt.Printf("Node %d registered with HTTP Address: %s\n", nodeID, httpAddr)
 
 	case "unregister":
 		if len(args) < 2 {
@@ -290,7 +207,6 @@ func (h *Handling) HandleNodes(args []string) {
 		fmt.Printf("\nNode ID: %d\n", nodeID)
 		fmt.Printf("  Role: %s\n", nodeState.Role)
 		fmt.Printf("  Term: %d\n", nodeState.Term)
-		fmt.Printf("  RPC Address: %s\n", nodeState.RPCAddress)
 		fmt.Printf("  HTTP Address: %s\n", nodeState.HTTPAddress)
 		fmt.Printf("  State: %v\n", map[bool]string{true: "Alive", false: "Dead"}[nodeState.IsAlive])
 		fmt.Printf("  Last Seen: %v\n", nodeState.LastSeen)
@@ -359,58 +275,11 @@ func (h *Handling) HandleReplicationStatus() {
 	}
 }
 
-func (h *Handling) HandleLatencyStats() {
-	fmt.Println("\n--- Latency Statistics ---")
-	events := h.manager.GetAllEvents()
-
-	if len(events) == 0 {
-		fmt.Println("No events recorded yet")
-		return
-	}
-
-	// Calculate latency statistics
-	var latencies []int64
-	latencyByType := make(map[string][]int64)
-
-	for _, event := range events {
-		latency := event.Duration.Milliseconds()
-		latencies = append(latencies, latency)
-		latencyByType[event.Type] = append(latencyByType[event.Type], latency)
-	}
-
-	// Sort latencies for percentile calculation
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-
-	fmt.Println("\nOverall Statistics:")
-	fmt.Printf("  Total Events: %d\n", len(latencies))
-	fmt.Printf("  Min Latency: %dms\n", latencies[0])
-	fmt.Printf("  Max Latency: %dms\n", latencies[len(latencies)-1])
-	fmt.Printf("  Avg Latency: %dms\n", h.calculateAverage(latencies))
-	fmt.Printf("  P50 (Median): %dms\n", h.calculatePercentile(latencies, 50))
-	fmt.Printf("  P95: %dms\n", h.calculatePercentile(latencies, 95))
-	fmt.Printf("  P99: %dms\n", h.calculatePercentile(latencies, 99))
-
-	fmt.Println("\nPer Event Type:")
-	for eventType := range latencyByType {
-		lats := latencyByType[eventType]
-		sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
-		fmt.Printf("\n  %s: (count: %d)\n", eventType, len(lats))
-		fmt.Printf("    Avg: %dms, Min: %dms, Max: %dms, P95: %dms\n",
-			h.calculateAverage(lats), lats[0], lats[len(lats)-1], h.calculatePercentile(lats, 95))
-	}
-}
-
 func HandleHelp() {
 	fmt.Println("\n--- Manager CLI - Available Commands ---")
 	fmt.Println()
 	fmt.Println("--- Cluster ---")
 	fmt.Println(" cluster status                              - Show cluster status (leader ID, term, live nodes)")
-	fmt.Println()
-	fmt.Println("--- Events & RPC Tracking ---")
-	fmt.Println(" events [list [limit]]                       - Show recent RPC events (default: last 20, excludes heartbeats)")
-	fmt.Println(" events filter <type>                        - Show events filtered by type (e.g., AppendEntries, RequestVote)")
-	fmt.Println(" events stats                                - Show aggregated event statistics (counts, average latency)")
-	fmt.Println(" events export <file>                        - Export all events to CSV file")
 	fmt.Println()
 	fmt.Println("--- Nodes ---")
 	fmt.Println(" nodes list                                  - Show status of all registered nodes")
@@ -421,7 +290,6 @@ func HandleHelp() {
 	fmt.Println("--- Diagnostics ---")
 	fmt.Println(" health check                                - Health check on all nodes (connectivity, state)")
 	fmt.Println(" replication status                          - Show replication progress (match index, next index)")
-	fmt.Println(" latency stats                               - Show RPC latency statistics (average, p95, etc.)")
 	fmt.Println()
 	fmt.Println("--- Manager Logs ---")
 	fmt.Println(" log [limit]                                 - Show manager internal logs (default: last 20)")
@@ -431,45 +299,6 @@ func HandleHelp() {
 	fmt.Println(" clear                                       - Clear the console")
 	fmt.Println(" exit                                        - Exit the program")
 	fmt.Println()
-}
-
-/* Helper Functions */
-
-func (h *Handling) printEvents(events []types.RPCEvent) {
-	if len(events) == 0 {
-		fmt.Println("No events recorded yet")
-		return
-	}
-
-	fmt.Println("\n--- Recent Events ---")
-	fmt.Println("Timestamp                 | From | To | Type           | Duration | Error")
-	fmt.Println(strings.Repeat("-", 90))
-
-	for _, event := range events {
-		errorMsg := ""
-		if event.Error != "" {
-			errorMsg = event.Error
-		}
-		fmt.Printf("%-25s | %-4d | %-2d | %-14s | %4dms   | %s\n",
-			event.Timestamp.Format("2006-01-02 15:04:05"),
-			event.From,
-			event.To,
-			event.Type,
-			event.Duration.Milliseconds(),
-			errorMsg)
-	}
-}
-
-func (h *Handling) printEventStats(stats map[string]interface{}) {
-	fmt.Println("\n--- Event Statistics ---")
-	if stats == nil {
-		fmt.Println("No statistics available")
-		return
-	}
-
-	for key, value := range stats {
-		fmt.Printf("%s: %v\n", key, value)
-	}
 }
 
 func (h *Handling) printNodeStatus(nodeID int) {
@@ -487,7 +316,6 @@ func (h *Handling) printNodeStatus(nodeID int) {
 	fmt.Printf("Commit Index: %d\n", nodeState.CommitIndex)
 	fmt.Printf("Last Applied: %d\n", nodeState.LastApplied)
 	fmt.Printf("Log Length: %d\n", nodeState.LogLength)
-	fmt.Printf("RPC Address: %s\n", nodeState.RPCAddress)
 	fmt.Printf("HTTP Address: %s\n", nodeState.HTTPAddress)
 	fmt.Printf("Status: %s\n", map[bool]string{true: "Alive", false: "Dead"}[nodeState.IsAlive])
 	fmt.Printf("Response Latency: %v\n", nodeState.ResponseLatency)
@@ -495,7 +323,7 @@ func (h *Handling) printNodeStatus(nodeID int) {
 }
 
 func (h *Handling) HandleLog(limit int) {
-	logs := h.manager.GetLogs(limit)
+	logs := h.manager.LogBuffer.GetLogs(limit)
 
 	if len(logs) == 0 {
 		fmt.Println("No logs available")
@@ -514,32 +342,4 @@ func (h *Handling) HandleLog(limit int) {
 		)
 	}
 	fmt.Println()
-}
-
-func (h *Handling) calculateAverage(latencies []int64) int64 {
-	if len(latencies) == 0 {
-		return 0
-	}
-	var sum int64
-	for _, l := range latencies {
-		sum += l
-	}
-	return sum / int64(len(latencies))
-}
-
-func (h *Handling) calculatePercentile(latencies []int64, p int) int64 {
-	if len(latencies) == 0 {
-		return 0
-	}
-	index := (len(latencies) * p) / 100
-	if index >= len(latencies) {
-		index = len(latencies) - 1
-	}
-	return latencies[index]
-}
-
-func getEventPredicate(eventType string) func(types.RPCEvent) bool {
-	return func(event types.RPCEvent) bool {
-		return event.Type == eventType
-	}
 }

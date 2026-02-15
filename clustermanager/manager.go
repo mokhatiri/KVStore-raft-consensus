@@ -1,110 +1,36 @@
 package clustermanager
 
 import (
-	"database/sql"
-	managerapi "distributed-kv/api/manager_api"
 	"distributed-kv/types"
-	"encoding/csv"
+	"encoding/json"
 	"fmt"
-	"log"
-	"net/rpc"
-	"os"
-	"strconv"
+	"net/http"
 	"sync"
 	"time"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
 type Manager struct {
-	eventBuffer *EventBuffer
-	logBuffer   *LogBuffer
-	db          *sql.DB
-	fileWriter  *EventFileWriter
-	eventsCh    chan types.RPCEvent
-
+	LogBuffer    *types.LogBuffer
 	clusterState *types.ClusterState
 
 	mu sync.RWMutex
 }
 
-func NewManager(dbPath string, outputDir string) *Manager {
-	db, err := sql.Open("sqlite3", dbPath)
-
-	if err != nil {
-		panic(fmt.Sprintf("Failed to open database: %v", err))
-	}
-
-	eventsCh := make(chan types.RPCEvent, EventBufferSize)
-	logBuffer := NewLogBuffer(1000)
-
+func NewManager() *Manager {
 	return &Manager{
-		eventBuffer:  NewEventBuffer(EventBufferSize),
-		logBuffer:    logBuffer,
-		db:           db,
-		fileWriter:   NewEventFileWriter(outputDir, eventsCh, logBuffer),
-		eventsCh:     eventsCh,
+		LogBuffer:    types.NewLogBuffer(1000),
 		clusterState: &types.ClusterState{Nodes: make(map[int]*types.NodeState)},
 	}
 }
 
-// initialize the db
-func (m *Manager) InitDB() error {
-	_, err := m.db.Exec(`
-	CREATE TABLE IF NOT EXISTS rpc_events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-		from_id INTEGER,
-		to_id INTEGER,
-		event_type TEXT,
-		details TEXT,
-		duration INTEGER,
-		error TEXT
-	);
-	`)
-
-	return err
-}
-
-// register a node in the cluster and subscribe to its events
-func (m *Manager) RegisterNode(nodeId int, nodeRPCAddress string, nodeHTTPAddress string) {
+// register a node in the cluster
+func (m *Manager) RegisterNode(nodeId int, nodeHTTPAddress string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.clusterState.Nodes[nodeId] = &types.NodeState{
 		ID:          nodeId,
-		RPCAddress:  nodeRPCAddress,
 		HTTPAddress: nodeHTTPAddress,
 	}
-}
-
-func (m *Manager) StartEventAggregation() {
-	// start the file writer goroutine
-	m.fileWriter.Start()
-}
-
-// save event to backends
-func (m *Manager) SaveEvent(event types.RPCEvent) error {
-	// Skip heartbeat events - don't add to buffer, but still save to DB and file
-	if !event.IsHeartbeat {
-		// save to in-memory buffer only for meaningful events
-		m.eventBuffer.AddEvent(event)
-		m.logBuffer.AddLog("DEBUG", fmt.Sprintf("Event saved: From=%d, To=%d, Type=%s, IsHeartbeat=%v", event.From, event.To, event.Type, event.IsHeartbeat))
-	}
-
-	// Always save to sqlite db (for full history)
-	_, err := m.db.Exec(`
-	INSERT INTO rpc_events (from_id, to_id, event_type, details, duration, error)
-	VALUES (?, ?, ?, ?, ?, ?);
-	`, event.From, event.To, event.Type, event.Details, event.Duration.Milliseconds(), event.Error)
-
-	if err != nil {
-		m.logBuffer.AddLog("ERROR", fmt.Sprintf("Error saving event to database: %v", err))
-	}
-
-	// Always send to file writer (for full event log)
-	m.eventsCh <- event
-
-	return nil
 }
 
 func (m *Manager) UpdateNodeState(nodeState *types.NodeState) error {
@@ -128,98 +54,9 @@ func (m *Manager) UpdateNodeState(nodeState *types.NodeState) error {
 
 // get cluster status
 func (m *Manager) GetClusterState() *types.ClusterState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.clusterState
-}
-
-// get events (heartbeats already filtered from buffer)
-func (m *Manager) GetEvents(limit int) []types.RPCEvent {
-	return m.eventBuffer.GetLast(limit)
-}
-
-// get all events from the buffer
-func (m *Manager) GetAllEvents() []types.RPCEvent {
-	return m.eventBuffer.GetAllEvents()
-}
-
-// get event statistics (heartbeats already filtered from buffer)
-func (m *Manager) GetEventStats() map[string]interface{} {
-	events := m.eventBuffer.GetAllEvents()
-	stats := make(map[string]interface{})
-
-	typeCount := make(map[string]int)
-	errorCount := 0
-	totalDuration := int64(0)
-
-	for _, event := range events {
-		typeCount[event.Type]++
-		totalDuration += event.Duration.Milliseconds()
-		if event.Error != "" {
-			errorCount++
-		}
-	}
-
-	stats["total_events"] = len(events)
-	stats["event_types"] = typeCount
-	stats["error_count"] = errorCount
-	stats["avg_duration_ms"] = int64(0)
-	if len(events) > 0 {
-		stats["avg_duration_ms"] = totalDuration / int64(len(events))
-	}
-
-	return stats
-}
-
-// get logs
-func (m *Manager) GetLogs(limit int) []LogMessage {
-	return m.logBuffer.GetLogs(limit)
-}
-
-// add log entry
-func (m *Manager) AddLog(level string, message string) {
-	m.logBuffer.AddLog(level, message)
-}
-
-// get log buffer reference
-func (m *Manager) GetLogBuffer() *LogBuffer {
-	return m.logBuffer
-}
-
-// export events to CSV format (heartbeats already filtered from buffer)
-func (m *Manager) ExportEventsToCSV(filename string) error {
-	events := m.eventBuffer.GetAllEvents()
-
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	// Write header
-	if err := writer.Write([]string{"Timestamp", "From", "To", "Type", "Details", "Duration(ms)", "Error"}); err != nil {
-		return fmt.Errorf("failed to write header: %v", err)
-	}
-
-	// Write events
-	for _, event := range events {
-		details := fmt.Sprintf("%v", event.Details)
-		row := []string{
-			event.Timestamp.String(),
-			strconv.Itoa(event.From),
-			strconv.Itoa(event.To),
-			event.Type,
-			details,
-			strconv.Itoa(int(event.Duration.Milliseconds())),
-			event.Error,
-		}
-		if err := writer.Write(row); err != nil {
-			return fmt.Errorf("failed to write row: %v", err)
-		}
-	}
-
-	return nil
 }
 
 // unregister a node from the cluster
@@ -251,13 +88,8 @@ func (m *Manager) checkNodeHealth() {
 
 	for _, node := range nodes {
 		go func(n *types.NodeState) {
-			if m.pingNode(n) {
-				// Node responded — mark as alive
-				n.IsAlive = true
-				n.LastSeen = time.Now()
-				m.UpdateNodeState(n)
-			} else {
-				// Node didn't respond — mark as dead if it's been down for 30+ seconds
+			if err := m.fetchNodeState(n); err != nil {
+				// Mark as dead if it's been down for 30+ seconds
 				if time.Since(n.LastSeen) > 30*time.Second {
 					n.IsAlive = false
 					m.UpdateNodeState(n)
@@ -267,22 +99,45 @@ func (m *Manager) checkNodeHealth() {
 	}
 }
 
-func (m *Manager) pingNode(node *types.NodeState) bool {
-	client, err := rpc.Dial("tcp", node.RPCAddress)
-	if err != nil {
-		return false
-	}
-	defer client.Close()
+func (m *Manager) fetchNodeState(node *types.NodeState) error {
+	start := time.Now()
 
-	var reply bool
-	err = client.Call("ConsensusRPC.Ping", node.ID, &reply)
-	return err == nil && reply
+	url := fmt.Sprintf("http://%s/state", node.HTTPAddress)
+	resp, err := http.Get(url)
+	if err != nil {
+		node.IsAlive = false
+		return err
+	}
+	defer resp.Body.Close()
+
+	node.ResponseLatency = time.Since(start)
+	node.IsAlive = resp.StatusCode == http.StatusOK
+	node.LastSeen = time.Now()
+
+	var data map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return err
+	}
+
+	if role, ok := data["role"].(string); ok {
+		node.Role = role
+	}
+	if term, ok := data["term"].(float64); ok {
+		node.Term = int(term)
+	}
+	if commitIndex, ok := data["commitIndex"].(float64); ok {
+		node.CommitIndex = int(commitIndex)
+	}
+	if logLen, ok := data["logLength"].(float64); ok {
+		node.LogLength = int(logLen)
+	}
+
+	return m.UpdateNodeState(node)
 }
 
-// start the manager RPC server
-func (m *Manager) Start(address string) {
-	err := managerapi.StartManagerRPCServer(address, m, m.logBuffer)
-	if err != nil {
-		log.Fatalf("Failed to start manager RPC server: %v", err)
-	}
+func (m *Manager) StartListening(interval time.Duration) {
+	// call checkNodeHealth immediately and then start the periodic health check
+	m.checkNodeHealth()
+	m.StartHealthCheck(interval)
+
 }

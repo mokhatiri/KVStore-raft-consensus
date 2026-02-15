@@ -6,7 +6,6 @@ import (
 	"distributed-kv/cli/nodecli"
 	"distributed-kv/clustermanager"
 	"distributed-kv/consensus"
-	"distributed-kv/storage"
 	"fmt"
 	"log"
 	"os"
@@ -33,7 +32,7 @@ func startManagerCLI(manager *clustermanager.Manager) {
 	}
 }
 
-func startNodeCLI(raftConsensus *consensus.RaftConsensus, store *storage.Store) {
+func startNodeCLI(raftConsensus *consensus.RaftConsensus) {
 	// Start Raft consensus
 	nodeId, nodeRole, _, _ := raftConsensus.GetNodeStatus()
 	log.Printf("Node %d started. Role: %s", nodeId, nodeRole)
@@ -43,7 +42,7 @@ func startNodeCLI(raftConsensus *consensus.RaftConsensus, store *storage.Store) 
 	log.Println("------------------- Starting Node CLI ------------------")
 	defer log.Println("------------------- Node CLI Exited ------------------")
 
-	handlers := nodecli.NewHandling(raftConsensus, store)
+	handlers := nodecli.NewHandling(raftConsensus)
 
 	for {
 		nodeId, nodeRole, _, _ := raftConsensus.GetNodeStatus()

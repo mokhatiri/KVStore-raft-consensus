@@ -6,7 +6,7 @@ type ClusterState struct {
 	// Static
 	Nodes map[int]*NodeState // ID → Node details
 
-	// Dynamic (updates as events arrive)
+	// Dynamic
 	Leader      int
 	CurrentTerm int
 	ElectedAt   time.Time
@@ -18,9 +18,7 @@ type ClusterState struct {
 	LastHeartbeat map[int]time.Time // [nodeID] = last contact time
 	LiveNodes     int
 
-	// Stats
-	TotalEventsProcessed int
-	CommittedEntries     int
+	CommittedEntries int
 }
 
 type NodeState struct {
@@ -30,7 +28,6 @@ type NodeState struct {
 	CommitIndex int
 	LastApplied int
 	LogLength   int
-	RPCAddress  string
 	HTTPAddress string
 
 	// Health
@@ -40,13 +37,6 @@ type NodeState struct {
 }
 
 type ManagerInterface interface {
-	SaveEvent(args RPCEvent) error
 	UpdateNodeState(args *NodeState) error
 	GetClusterState() *ClusterState
-	GetEvents(limit int) []RPCEvent
-}
-
-// Logger is a simple logging interface to avoid import cycles
-type Logger interface {
-	AddLog(level string, message string)
 }

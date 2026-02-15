@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"distributed-kv/clustermanager"
 	"distributed-kv/storage"
 	"distributed-kv/types"
 )
@@ -23,6 +22,7 @@ type MockConsensus struct {
 	commitIndex int
 	logLen      int
 	proposeErr  bool
+	store       *storage.Store
 }
 
 func (m *MockConsensus) RequestVote(term int, candidateId int, lastLogIndex int, lastLogTerm int) (bool, int) {
@@ -37,6 +37,7 @@ func (m *MockConsensus) GetCurrentTerm() int { return m.term }
 func (m *MockConsensus) GetNodeID() int      { return m.nodeID }
 func (m *MockConsensus) GetVotedFor() int    { return m.votedFor }
 func (m *MockConsensus) GetRole() string     { return m.role }
+func (m *MockConsensus) GetStore() any       { return m.store }
 
 func (m *MockConsensus) GetNodeStatus() (int, string, int, int) {
 	return m.nodeID, m.role, m.commitIndex, m.logLen
@@ -49,13 +50,39 @@ func (m *MockConsensus) Propose(command string) (int, int, bool) {
 	return 1, m.term, true
 }
 
-func (m *MockConsensus) EmitRPCEvent(event types.RPCEvent) {}
+func (m *MockConsensus) GetSnapshot() *types.Snapshot {
+	return nil // No snapshot for mock
+}
+
+func (m *MockConsensus) InstallSnapshot(term int, leaderId int, lastIncludedIndex int, lastIncludedTerm int, data map[string]any) (int, error) {
+	return 0, nil // Mock implementation
+}
+
+func (m *MockConsensus) RequestAddServer(nodeID int, rpcaddress string, httpaddress string) error {
+	return nil // Mock implementation
+}
+
+func (m *MockConsensus) RequestRemoveServer(nodeID int) error {
+	return nil // Mock implementation
+}
+
+func (m *MockConsensus) IsLeader() bool {
+	return m.role == "Leader"
+}
+
+func (m *MockConsensus) GetLeader() (int, string) {
+	if m.role == "Leader" {
+		return m.nodeID, "localhost:9000"
+	}
+	return 1, "localhost:9001" // Assume node 1 is leader by default
+}
 
 // --- Helper to build a test server with mux (not listening) ---
 
 func setupTestServer(mock *MockConsensus) (*NodeServer, *http.ServeMux) {
 	store := storage.NewStore()
-	s := NewNodeServer(store, mock, ":0", clustermanager.NewLogBuffer(100))
+	mock.store = store
+	s := NewNodeServer(mock, ":0", types.NewLogBuffer(100))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/kv/", func(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +114,26 @@ func setupTestServer(mock *MockConsensus) (*NodeServer, *http.ServeMux) {
 		}
 	})
 
+	mux.HandleFunc("/cluster/add-server/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.handleAddServer(w, r); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to add server: %v", err), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/cluster/remove-server/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.handleRemoveServer(w, r); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to remove server: %v", err), http.StatusInternalServerError)
+		}
+	})
+
 	return s, mux
 }
 
@@ -99,7 +146,8 @@ func TestGetKeyExists(t *testing.T) {
 	s, mux := setupTestServer(mock)
 
 	// Pre-populate the store
-	s.store.Set("greeting", "hello")
+	store := s.consensus.GetStore().(*storage.Store)
+	store.Set("greeting", "hello")
 
 	req := httptest.NewRequest(http.MethodGet, "/kv/greeting", nil)
 	rr := httptest.NewRecorder()
@@ -137,7 +185,8 @@ func TestGetKeyNotFound(t *testing.T) {
 func TestGetContentType(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 	s, mux := setupTestServer(mock)
-	s.store.Set("key1", "val1")
+	store := s.consensus.GetStore().(*storage.Store)
+	store.Set("key1", "val1")
 
 	req := httptest.NewRequest(http.MethodGet, "/kv/key1", nil)
 	rr := httptest.NewRecorder()
@@ -243,7 +292,7 @@ func TestDeleteKeyAsFollower(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("Expected 404 (not leader goes through error path), got %d", rr.Code)
+		t.Fatalf("Expected 404 (not leader), got %d", rr.Code)
 	}
 }
 
@@ -367,21 +416,21 @@ func TestHealthContentType(t *testing.T) {
 
 func TestNewServer(t *testing.T) {
 	store := storage.NewStore()
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
-	s := NewNodeServer(store, mock, ":9090", clustermanager.NewLogBuffer(100))
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1, store: store}
+	s := NewNodeServer(mock, ":9090", types.NewLogBuffer(100))
 
 	if s.addr != ":9090" {
 		t.Errorf("Expected addr ':9090', got '%s'", s.addr)
 	}
-	if s.store != store {
+	if s.consensus.GetStore() != store {
 		t.Errorf("Store reference mismatch")
 	}
 }
 
 func TestServerStartStop(t *testing.T) {
 	store := storage.NewStore()
-	mock := &MockConsensus{role: "Follower", term: 0, nodeID: 1}
-	s := NewNodeServer(store, mock, ":0", clustermanager.NewLogBuffer(100)) // port 0 = random available port
+	mock := &MockConsensus{role: "Follower", term: 0, nodeID: 1, store: store}
+	s := NewNodeServer(mock, ":0", types.NewLogBuffer(100)) // port 0 = random available port
 
 	s.Start()
 	defer s.Stop()
@@ -403,7 +452,8 @@ func TestGetAfterSet(t *testing.T) {
 	s, mux := setupTestServer(mock)
 
 	// Simulate data that has been committed and applied to the store
-	s.store.Set("name", "raft")
+	store := s.consensus.GetStore().(*storage.Store)
+	store.Set("name", "raft")
 
 	req := httptest.NewRequest(http.MethodGet, "/kv/name", nil)
 	rr := httptest.NewRecorder()
@@ -437,8 +487,9 @@ func TestMultipleKeyOperations(t *testing.T) {
 	}
 
 	// Populate store to simulate committed data for reads
+	store := s.consensus.GetStore().(*storage.Store)
 	for _, k := range keys {
-		s.store.Set(k, k+"_value")
+		store.Set(k, k+"_value")
 	}
 
 	// GET each key
@@ -457,5 +508,178 @@ func TestMultipleKeyOperations(t *testing.T) {
 	mux.ServeHTTP(delRR, delReq)
 	if delRR.Code != http.StatusNoContent {
 		t.Fatalf("DELETE /kv/b: Expected 204, got %d", delRR.Code)
+	}
+}
+
+// ==============================
+// POST /cluster/add-server/{nodeID}
+// ==============================
+
+func TestAddServerAsLeader(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	_, mux := setupTestServer(mock)
+
+	// Prepare request body
+	reqBody := strings.NewReader(`{
+		"rpc_address": "localhost:8002",
+		"http_address": "localhost:9002"
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/2", reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if body["key"] != float64(2) {
+		t.Errorf("Expected key 2, got %v", body["key"])
+	}
+
+	if body["rpc_address"] != "localhost:8002" {
+		t.Errorf("Expected rpc_address 'localhost:8002', got %v", body["rpc_address"])
+	}
+
+	if body["http_address"] != "localhost:9002" {
+		t.Errorf("Expected http_address 'localhost:9002', got %v", body["http_address"])
+	}
+}
+
+func TestAddServerAsFollower(t *testing.T) {
+	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3}
+	_, mux := setupTestServer(mock)
+
+	reqBody := strings.NewReader(`{
+		"rpc_address": "localhost:8002",
+		"http_address": "localhost:9002"
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/2", reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected 500, got %d", rr.Code)
+	}
+}
+
+func TestAddServerInvalidNodeID(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	_, mux := setupTestServer(mock)
+
+	reqBody := strings.NewReader(`{
+		"rpc_address": "localhost:8002",
+		"http_address": "localhost:9002"
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/invalid", reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400, got %d", rr.Code)
+	}
+}
+
+func TestAddServerInvalidJSON(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	_, mux := setupTestServer(mock)
+
+	reqBody := strings.NewReader(`{invalid json}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/2", reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400, got %d", rr.Code)
+	}
+}
+
+func TestAddServerMethodNotAllowed(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	_, mux := setupTestServer(mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/cluster/add-server/2", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("Expected 405, got %d", rr.Code)
+	}
+}
+
+// ==============================
+// POST /cluster/remove-server/{nodeID}
+// ==============================
+
+func TestRemoveServerAsLeader(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	_, mux := setupTestServer(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/cluster/remove-server/2", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if body["nodeID"] != float64(2) {
+		t.Errorf("Expected nodeID 2, got %v", body["nodeID"])
+	}
+}
+
+func TestRemoveServerAsFollower(t *testing.T) {
+	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3}
+	_, mux := setupTestServer(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/cluster/remove-server/2", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected 500, got %d", rr.Code)
+	}
+}
+
+func TestRemoveServerInvalidNodeID(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	_, mux := setupTestServer(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/cluster/remove-server/invalid", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400, got %d", rr.Code)
+	}
+}
+
+func TestRemoveServerMethodNotAllowed(t *testing.T) {
+	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	_, mux := setupTestServer(mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/cluster/remove-server/2", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("Expected 405, got %d", rr.Code)
 	}
 }

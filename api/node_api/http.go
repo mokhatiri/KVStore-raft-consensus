@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"distributed-kv/clustermanager"
 	"distributed-kv/handlers"
 	"distributed-kv/storage"
 	"distributed-kv/types"
@@ -29,16 +28,14 @@ import (
 
 // the server struct
 type NodeServer struct {
-	store       *storage.Store
 	consensus   types.ConsensusModule
 	addr        string
 	http_server *http.Server
-	logBuffer   *clustermanager.LogBuffer
+	logBuffer   *types.LogBuffer
 }
 
-func NewNodeServer(store *storage.Store, consensus types.ConsensusModule, addr string, logBuffer *clustermanager.LogBuffer) *NodeServer {
+func NewNodeServer(consensus types.ConsensusModule, addr string, logBuffer *types.LogBuffer) *NodeServer {
 	return &NodeServer{
-		store:     store,
 		consensus: consensus,
 		addr:      addr,
 		logBuffer: logBuffer,
@@ -88,6 +85,55 @@ func (s *NodeServer) Start() {
 		}
 	})
 
+	// Observability endpoints for manager HTTP polling
+	mux.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleState(w, r)
+	})
+
+	mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handlePeers(w, r)
+	})
+
+	mux.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleLogs(w, r)
+	})
+
+	mux.HandleFunc("/raftinfo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleRaftInfo(w, r)
+	})
+
+	mux.HandleFunc("/cluster/add-server/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleAddServer(w, r)
+	})
+
+	mux.HandleFunc("/cluster/remove-server/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleRemoveServer(w, r)
+	})
+
 	s.http_server.Handler = mux
 
 	go func() {
@@ -118,7 +164,8 @@ func (s *NodeServer) handleGet(w http.ResponseWriter, r *http.Request) error {
 
 		// fast read from the store
 		// no need to check for leadership or consensus for reads, as we can serve stale reads from followers
-		value, exists := s.store.Get(key)
+		store := s.consensus.GetStore().(*storage.Store)
+		value, exists := store.Get(key)
 		if !exists {
 			return fmt.Errorf("key not found")
 		}
@@ -135,6 +182,88 @@ func (s *NodeServer) handleGet(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	return nil
+}
+
+func (s *NodeServer) handleAddServer(w http.ResponseWriter, r *http.Request) error {
+	// Handle POST request to add a new server to the cluster.
+
+	select {
+	case <-r.Context().Done():
+		return fmt.Errorf("request cancelled")
+
+	default:
+		node := r.URL.Path[len("/cluster/add-server/"):]
+		// the key to int
+		var key int
+		_, err := fmt.Sscanf(node, "%d", &key)
+		if err != nil {
+			http.Error(w, "Invalid node ID", http.StatusBadRequest)
+			return fmt.Errorf("invalid node ID: %w", err)
+		}
+
+		// decode the value from the request body
+		var requestBody struct {
+			RPCAddress  string `json:"rpc_address"`
+			HTTPAddress string `json:"http_address"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, "Failed to decode request body", http.StatusBadRequest)
+			return fmt.Errorf("failed to decode request body: %w", err)
+		}
+
+		// use the add server handler to add the new server to the cluster
+
+		if _, err := handlers.AddServerHandler(s.consensus, key, requestBody.HTTPAddress, requestBody.RPCAddress); err != nil {
+			http.Error(w, "Failed to add server", http.StatusInternalServerError)
+			return fmt.Errorf("failed to add server: %w", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"key":          key,
+			"rpc_address":  requestBody.RPCAddress,
+			"http_address": requestBody.HTTPAddress,
+		}); err != nil {
+			return fmt.Errorf("failed to encode response body: %w", err)
+		}
+
+		return nil
+	}
+}
+
+func (s *NodeServer) handleRemoveServer(w http.ResponseWriter, r *http.Request) error {
+	// Handle POST request to remove a server from the cluster.
+
+	select {
+	case <-r.Context().Done():
+		return fmt.Errorf("request cancelled")
+
+	default:
+		nodeID := r.URL.Path[len("/cluster/remove-server/"):]
+		var id int
+		_, err := fmt.Sscanf(nodeID, "%d", &id)
+		if err != nil {
+			http.Error(w, "Invalid node ID", http.StatusBadRequest)
+			return fmt.Errorf("invalid node ID: %w", err)
+		}
+
+		// use the remove server handler to remove the server from the cluster
+		if _, err := handlers.RemoveServerHandler(s.consensus, id); err != nil {
+			http.Error(w, "Failed to remove server", http.StatusInternalServerError)
+			return fmt.Errorf("failed to remove server: %w", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"nodeID": id,
+		}); err != nil {
+			return fmt.Errorf("failed to encode response body: %w", err)
+		}
+
+		return nil
+	}
 }
 
 func (s *NodeServer) handleSet(w http.ResponseWriter, r *http.Request) error {
@@ -225,4 +354,74 @@ func (s *NodeServer) handleHealth(w http.ResponseWriter, r *http.Request) error 
 	})
 
 	return nil
+}
+
+// handleState returns the current node state (used by manager for polling)
+func (s *NodeServer) handleState(w http.ResponseWriter, r *http.Request) {
+	nodeID, role, commitIndex, logLen := s.consensus.GetNodeStatus()
+	term := s.consensus.GetCurrentTerm()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":          nodeID,
+		"role":        role,
+		"term":        term,
+		"commitIndex": commitIndex,
+		"logLength":   logLen,
+		"isAlive":     true,
+		"lastSeen":    time.Now(),
+	})
+}
+
+// handlePeers returns the list of peers (used by manager to discover cluster topology)
+func (s *NodeServer) handlePeers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"peers": []map[string]any{},
+	})
+}
+
+// handleLogs returns recent node logs (used by manager for debugging)
+func (s *NodeServer) handleLogs(w http.ResponseWriter, r *http.Request) {
+	limitStr := r.URL.Query().Get("limit")
+	limit := 20 // default limit
+	if limitStr != "" {
+		if l, err := parseIntQuery(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	logs := s.logBuffer.GetLogs(limit)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"count": len(logs),
+		"logs":  logs,
+	})
+}
+
+// handleRaftInfo returns Raft consensus information
+func (s *NodeServer) handleRaftInfo(w http.ResponseWriter, r *http.Request) {
+	nodeID, role, commitIndex, logLen := s.consensus.GetNodeStatus()
+	term := s.consensus.GetCurrentTerm()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"nodeID":       nodeID,
+		"term":         term,
+		"role":         role,
+		"commitIndex":  commitIndex,
+		"lastLogIndex": logLen,
+	})
+}
+
+// parseIntQuery parses a query string parameter as an integer
+func parseIntQuery(s string) (int, error) {
+	var n int
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
 }

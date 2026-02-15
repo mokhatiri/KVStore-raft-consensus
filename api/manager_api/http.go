@@ -1,19 +1,11 @@
 package managerapi
 
-/*
-- Create routes for manager API:
-  GET /cluster/status
-  GET /cluster/events?limit=100
-  GET /cluster/nodes
-*/
-
 import (
 	"context"
 	"distributed-kv/types"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -21,10 +13,10 @@ type ManagerServer struct {
 	manager     types.ManagerInterface
 	addr        string
 	http_server *http.Server
-	logger      types.Logger
+	logger      *types.LogBuffer
 }
 
-func NewManagerServer(addr string, manager types.ManagerInterface, logger types.Logger) *ManagerServer {
+func NewManagerServer(addr string, manager types.ManagerInterface, logger *types.LogBuffer) *ManagerServer {
 	return &ManagerServer{
 		manager: manager,
 		addr:    addr,
@@ -49,17 +41,6 @@ func (s *ManagerServer) Start() {
 			return
 		}
 		if err := s.handleClusterStatus(w, r); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError) // 500 Internal Server Error if something goes wrong
-		}
-	})
-
-	// /cluster/events?limit=... route
-	mux.HandleFunc("/cluster/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if err := s.handleClusterEvents(w, r); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError) // 500 Internal Server Error if something goes wrong
 		}
 	})
@@ -110,25 +91,6 @@ func (s *ManagerServer) handleClusterStatus(w http.ResponseWriter, r *http.Reque
 		"totalNodes":           len(clusterState.Nodes),
 		"electedAt":            clusterState.ElectedAt,
 		"replicationProgress":  clusterState.ReplicationProgress,
-		"totalEventsProcessed": clusterState.TotalEventsProcessed,
-	})
-}
-
-func (s *ManagerServer) handleClusterEvents(w http.ResponseWriter, r *http.Request) error {
-	limitStr := r.URL.Query().Get("limit")
-	limit := 100
-	if limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-			limit = l
-		}
-	}
-
-	events := s.manager.GetEvents(limit)
-
-	w.Header().Set("Content-Type", "application/json")
-	return json.NewEncoder(w).Encode(map[string]any{
-		"count":  len(events),
-		"events": events,
 	})
 }
 

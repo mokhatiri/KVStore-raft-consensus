@@ -3,6 +3,7 @@ package rpc_test
 import (
 	"distributed-kv/consensus"
 	"distributed-kv/rpc"
+	"distributed-kv/storage"
 	"distributed-kv/types"
 	"net"
 	netRpc "net/rpc"
@@ -18,6 +19,7 @@ type MockConsensus struct {
 	currentTerm         int
 	lastVoteGranted     bool
 	lastAppendSucceeded bool
+	store               any
 }
 
 func (mc *MockConsensus) GetRole() string {
@@ -33,6 +35,18 @@ func (mc *MockConsensus) GetVotedFor() int {
 		return 1 // Mock candidate ID that was voted for
 	}
 	return -1 // No vote granted
+}
+
+func (mc *MockConsensus) GetStore() any {
+	return mc.store
+}
+
+func (mc *MockConsensus) GetSnapshot() *types.Snapshot {
+	return nil // No snapshot for mock
+}
+
+func (mc *MockConsensus) InstallSnapshot(term int, leaderId int, lastIncludedIndex int, lastIncludedTerm int, data map[string]any) (int, error) {
+	return 0, nil // Mock implementation
 }
 
 func (mc *MockConsensus) RequestVote(term int, candidateId int, lastLogIndex int, lastLogTerm int) (bool, int) {
@@ -62,23 +76,30 @@ func (mc *MockConsensus) Propose(command string) (index int, term int, isLeader 
 	return 0, mc.currentTerm, false
 }
 
+func (mc *MockConsensus) RequestAddServer(nodeID int, rpcaddress string, httpaddress string) error {
+	// Mock implementation
+	return nil
+}
+
+func (mc *MockConsensus) RequestRemoveServer(nodeID int) error {
+	// Mock implementation
+	return nil
+}
+
+func (mc *MockConsensus) IsLeader() bool {
+	return false // Default is not a leader
+}
+
+func (mc *MockConsensus) GetLeader() (int, string) {
+	return 1, "localhost:9001" // Default leader
+}
+
 func (mc *MockConsensus) GetCurrentTerm() int {
 	return mc.currentTerm
 }
 
 func (mc *MockConsensus) GetNodeID() int {
 	return 1 // Mock node ID
-}
-
-func (mc *MockConsensus) GetApplyCh() <-chan types.ApplyMsg {
-	// Mock implementation - return closed channel
-	ch := make(chan types.ApplyMsg)
-	close(ch)
-	return ch
-}
-
-func (mc *MockConsensus) EmitRPCEvent(event types.RPCEvent) {
-	// Mock implementation - do nothing
 }
 
 func (mc *MockConsensus) Start() {
@@ -117,7 +138,7 @@ func TestRequestVoteRPC(t *testing.T) {
 	}
 
 	// Make RPC call
-	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, nil)
+	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, 2)
 
 	if err != nil {
 		t.Fatalf("SendRequestVote failed: %v", err)
@@ -147,7 +168,7 @@ func TestRequestVoteRPCLowerTerm(t *testing.T) {
 	}
 
 	// Make RPC call with lower term
-	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, nil)
+	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, 2)
 
 	if err != nil {
 		t.Fatalf("SendRequestVote failed: %v", err)
@@ -182,7 +203,7 @@ func TestAppendEntriesRPC(t *testing.T) {
 	}
 
 	// Make RPC call
-	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries, 1, 2, nil)
+	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries, 1, 2)
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
@@ -212,7 +233,7 @@ func TestAppendEntriesHeartbeat(t *testing.T) {
 	}
 
 	// Send heartbeat (empty entries)
-	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2, nil)
+	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2)
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries heartbeat failed: %v", err)
@@ -229,7 +250,7 @@ func TestAppendEntriesHeartbeat(t *testing.T) {
 
 func TestRequestVoteConnectionFailure(t *testing.T) {
 	// Try to connect to non-existent server
-	granted, term, err := rpc.SendRequestVote("localhost:9999", 1, 1, 0, 0, 1, nil)
+	granted, term, err := rpc.SendRequestVote("localhost:9999", 1, 1, 0, 0, 1, 2)
 
 	if err == nil {
 		t.Errorf("Expected connection error, but got none")
@@ -246,7 +267,7 @@ func TestRequestVoteConnectionFailure(t *testing.T) {
 
 func TestAppendEntriesConnectionFailure(t *testing.T) {
 	// Try to connect to non-existent server
-	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2, nil)
+	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2)
 
 	if err == nil {
 		t.Errorf("Expected connection error, but got none")
@@ -267,16 +288,25 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll("./state") })
 
 	// Create a real RaftConsensus instance
+	peers := make(map[int]string)
+	peers[2] = "localhost:9006"
+	peers[3] = "localhost:9007"
+
+	peersHttp := make(map[int]string)
+	peersHttp[2] = "localhost:9006"
+	peersHttp[3] = "localhost:9007"
+
 	node := &types.Node{
 		ID:        1,
 		Address:   "localhost:9005",
-		Peers:     []string{"localhost:9006", "localhost:9007"},
-		PeerIDs:   []int{2, 3},
+		Peers:     peers,
+		PeersHttp: peersHttp,
 		Role:      "Follower",
 		Log:       []types.LogEntry{},
 		CommitIdx: 0,
 	}
-	raftConsensus := consensus.NewRaftConsensus(node)
+	store := storage.NewStore()
+	raftConsensus := consensus.NewRaftConsensus(node, store, nil)
 
 	address := "localhost:9005"
 
@@ -287,7 +317,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 	}
 
 	// Test RequestVote
-	granted, term, err := rpc.SendRequestVote(address, 2, 2, 0, 0, 2, nil)
+	granted, term, err := rpc.SendRequestVote(address, 2, 2, 0, 0, 2, 1)
 	if err != nil {
 		t.Fatalf("SendRequestVote failed: %v", err)
 	}
@@ -310,7 +340,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 		},
 	}
 
-	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries, 2, 3, nil)
+	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries, 2, 3)
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
 	}

@@ -48,8 +48,6 @@ func (rs *RaftServer) RequestVote(args *types.RequestVoteArgs, reply *types.Requ
 	reply.Term = term
 	reply.VoteGranted = voteGranted
 
-	rs.consensus.EmitRPCEvent(types.EmitRequestVoteEvent(rs.nodeID, args.CandidateID, *args, *reply, 0, ""))
-
 	return nil
 }
 
@@ -63,24 +61,21 @@ func (rs *RaftServer) AppendEntries(args *types.AppendEntriesArgs, reply *types.
 		reply.Success = true
 	}
 
-	errStr := ""
-	if err != nil {
-		errStr = err.Error()
-	}
-
-	// Only emit events for actual log entries or errors
-	// Skip empty heartbeats completely to avoid log spam
-	if len(args.Entries) > 0 || errStr != "" {
-		rs.consensus.EmitRPCEvent(types.EmitAppendEntriesEvent(rs.nodeID, args.LeaderID, *args, *reply, 0, errStr))
-	}
-
-	return nil
+	return err
 }
 
 // Ping is a simple health check endpoint that returns true if the node is alive
 func (rs *RaftServer) Ping(nodeID int, reply *bool) error {
 	*reply = true
 	return nil
+}
+
+// InstallSnapshot handles snapshot installation from the leader
+func (rs *RaftServer) InstallSnapshot(args *types.InstallSnapshotArgs, reply *types.InstallSnapshotReply) error {
+	term, err := rs.consensus.InstallSnapshot(args.Term, args.LeaderID, args.LastIncludedIndex, args.LastIncludedTerm, args.Data)
+	reply.Term = term
+
+	return err
 }
 
 // StartServer registers the RPC server and listens for incoming requests
