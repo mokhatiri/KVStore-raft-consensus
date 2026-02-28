@@ -474,6 +474,10 @@ tail -f logbuffer.log
 
 For issues, questions, or suggestions, open a GitHub issue or contact the maintainers.
 
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
 ---
 
 **Status**: Alpha. Suitable for learning and small-scale deployments. Production use requires TLS, monitoring, and operational tooling .
