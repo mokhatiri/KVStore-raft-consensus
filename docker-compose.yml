@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  # PostgreSQL for SonarQube
+  postgres:
+    image: postgres:15-alpine
+    container_name: kvstore-postgres
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonarpassword
+      POSTGRES_DB: sonarqube
+    volumes:
+      - postgres_volume:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # SonarQube
+  sonarqube:
+    image: sonarqube:10-community
+    container_name: kvstore-sonarqube
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonarpassword
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/system/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # KVStore Node 1
+  kvstore-node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kvstore-node1
+    environment:
+      - NODE_ID=1
+    ports:
+      - "8080:8080"  # HTTP API
+      - "8090:8090"  # Admin API
+      - "50051:50051" # RPC
+    volumes:
+      - ./cluster.json:/root/cluster.json:ro
+    depends_on:
+      - postgres
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # KVStore Node 2
+  kvstore-node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kvstore-node2
+    environment:
+      - NODE_ID=2
+    ports:
+      - "8081:8080"
+      - "8091:8090"
+      - "50052:50051"
+    volumes:
+      - ./cluster.json:/root/cluster.json:ro
+    depends_on:
+      - postgres
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # KVStore Node 3
+  kvstore-node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kvstore-node3
+    environment:
+      - NODE_ID=3
+    ports:
+      - "8082:8080"
+      - "8092:8090"
+      - "50053:50051"
+    volumes:
+      - ./cluster.json:/root/cluster.json:ro
+    depends_on:
+      - postgres
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_volume:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+
+networks:
+  kvstore-network:
+    driver: bridge
