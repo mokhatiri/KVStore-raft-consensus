@@ -92,7 +92,7 @@ func (m *Manager) checkNodeHealth() {
 				// Mark as dead if it's been down for 30+ seconds
 				if time.Since(n.LastSeen) > 30*time.Second {
 					n.IsAlive = false
-					m.UpdateNodeState(n)
+					_ = m.UpdateNodeState(n)
 				}
 			}
 		}(node)

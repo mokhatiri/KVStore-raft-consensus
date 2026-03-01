@@ -124,7 +124,7 @@ func (dp *DatabasePersister) SaveState(currentTerm int, votedFor int, log []type
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Update raft_state
 	_, err = tx.Exec(
@@ -199,7 +199,7 @@ func (dp *DatabasePersister) clearState() error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Reset raft_state
 	_, err = tx.Exec("UPDATE raft_state SET current_term = 0, voted_for = -1, log_json = '[]' WHERE id = 1")
@@ -306,7 +306,7 @@ func (dp *DatabasePersister) SaveKVStore(data map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Clear existing KV store
 	_, err = tx.Exec("DELETE FROM kv_store")

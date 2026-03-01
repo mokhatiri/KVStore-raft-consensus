@@ -1,0 +1,11 @@
+{
+  "nodes": [
+    {"id": 1, "rpcAddr": "kvstore-node1:8001", "httpAddr": "kvstore-node1:9001", "pprofAddr": "kvstore-node1:6060"},
+    {"id": 2, "rpcAddr": "kvstore-node2:8001", "httpAddr": "kvstore-node2:9001", "pprofAddr": "kvstore-node2:6060"},
+    {"id": 3, "rpcAddr": "kvstore-node3:8001", "httpAddr": "kvstore-node3:9001", "pprofAddr": "kvstore-node3:6060"}
+  ],
+  "manager": {
+    "httpAddr": "0.0.0.0:8080",
+    "pprofAddr": "0.0.0.0:6060"
+  }
+}

@@ -176,10 +176,10 @@ func TestCleanHandlerAsFollower(t *testing.T) {
 func TestMultipleProposals(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 
-	SetHandler(mock, "k1", "v1")
-	SetHandler(mock, "k2", "v2")
-	DeleteHandler(mock, "k1")
-	CleanHandler(mock)
+	_, _ = SetHandler(mock, "k1", "v1")
+	_, _ = SetHandler(mock, "k2", "v2")
+	_, _ = DeleteHandler(mock, "k1")
+	_, _ = CleanHandler(mock)
 
 	if len(mock.proposed) != 4 {
 		t.Fatalf("Expected 4 proposed commands, got %d", len(mock.proposed))

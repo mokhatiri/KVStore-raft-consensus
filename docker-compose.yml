@@ -18,6 +18,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - kvstore-network
 
   # SonarQube
   sonarqube:
@@ -41,75 +43,89 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks:
+      - kvstore-network
 
-  # KVStore Node 1
+  # KVStore Manager (cluster coordinator)
+  kvstore-manager:
+    image: kvstore:latest
+    container_name: kvstore-manager
+    command: ["manager", "-config", "cluster.docker.json"]
+    depends_on:
+      - kvstore-node1
+    ports:
+      - "8080:8080"   # HTTP API
+      - "6060:6060"   # pprof
+    volumes:
+      - ./cluster.docker.json:/root/cluster.docker.json:ro
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # KVStore Node 1 (builds the image)
   kvstore-node1:
     build:
       context: .
       dockerfile: Dockerfile
+    image: kvstore:latest
     container_name: kvstore-node1
-    environment:
-      - NODE_ID=1
+    command: ["node", "-id", "1", "-config", "cluster.docker.json"]
     ports:
-      - "8080:8080"  # HTTP API
-      - "8090:8090"  # Admin API
-      - "50051:50051" # RPC
+      - "9001:9001"   # HTTP API (host:container)
+      - "8001:8001"   # RPC
+      - "6061:6060"   # pprof
     volumes:
-      - ./cluster.json:/root/cluster.json:ro
-    depends_on:
-      - postgres
+      - ./cluster.docker.json:/root/cluster.docker.json:ro
     networks:
       - kvstore-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9001/health"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # KVStore Node 2
+  # KVStore Node 2 (reuses the image)
   kvstore-node2:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: kvstore:latest
     container_name: kvstore-node2
-    environment:
-      - NODE_ID=2
-    ports:
-      - "8081:8080"
-      - "8091:8090"
-      - "50052:50051"
-    volumes:
-      - ./cluster.json:/root/cluster.json:ro
+    command: ["node", "-id", "2", "-config", "cluster.docker.json"]
     depends_on:
-      - postgres
+      - kvstore-node1
+    ports:
+      - "9002:9001"   # HTTP API (host:container)
+      - "8002:8001"   # RPC
+      - "6062:6060"   # pprof
+    volumes:
+      - ./cluster.docker.json:/root/cluster.docker.json:ro
     networks:
       - kvstore-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9001/health"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # KVStore Node 3
+  # KVStore Node 3 (reuses the image)
   kvstore-node3:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: kvstore:latest
     container_name: kvstore-node3
-    environment:
-      - NODE_ID=3
-    ports:
-      - "8082:8080"
-      - "8092:8090"
-      - "50053:50051"
-    volumes:
-      - ./cluster.json:/root/cluster.json:ro
+    command: ["node", "-id", "3", "-config", "cluster.docker.json"]
     depends_on:
-      - postgres
+      - kvstore-node1
+    ports:
+      - "9003:9001"   # HTTP API (host:container)
+      - "8003:8001"   # RPC
+      - "6063:6060"   # pprof
+    volumes:
+      - ./cluster.docker.json:/root/cluster.docker.json:ro
     networks:
       - kvstore-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9001/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -123,3 +139,4 @@ volumes:
 networks:
   kvstore-network:
     driver: bridge
+

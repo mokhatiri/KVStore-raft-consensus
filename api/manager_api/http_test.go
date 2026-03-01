@@ -93,7 +93,9 @@ func TestHandleClusterNodes(t *testing.T) {
 	}
 
 	var result map[string]any
-	json.Unmarshal(w.Body.Bytes(), &result)
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
 	if result["count"].(float64) != 2 {
 		t.Errorf("Expected 2 nodes, got %v", result["count"])
 	}

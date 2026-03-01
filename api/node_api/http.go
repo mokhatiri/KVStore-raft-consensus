@@ -123,7 +123,9 @@ func (s *NodeServer) Start() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		s.handleAddServer(w, r)
+		if err := s.handleAddServer(w, r); err != nil {
+			s.logBuffer.AddLog("ERROR", fmt.Sprintf("handleAddServer error: %v", err))
+		}
 	})
 
 	mux.HandleFunc("/cluster/remove-server/", func(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +133,9 @@ func (s *NodeServer) Start() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		s.handleRemoveServer(w, r)
+		if err := s.handleRemoveServer(w, r); err != nil {
+			s.logBuffer.AddLog("ERROR", fmt.Sprintf("handleRemoveServer error: %v", err))
+		}
 	})
 
 	s.http_server.Handler = mux
