@@ -85,12 +85,12 @@ func (s *ManagerServer) handleClusterStatus(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(map[string]any{
-		"leader":               clusterState.Leader,
-		"currentTerm":          clusterState.CurrentTerm,
-		"liveNodes":            aliveCount,
-		"totalNodes":           len(clusterState.Nodes),
-		"electedAt":            clusterState.ElectedAt,
-		"replicationProgress":  clusterState.ReplicationProgress,
+		"leader":              clusterState.Leader,
+		"currentTerm":         clusterState.CurrentTerm,
+		"liveNodes":           aliveCount,
+		"totalNodes":          len(clusterState.Nodes),
+		"electedAt":           clusterState.ElectedAt,
+		"replicationProgress": clusterState.ReplicationProgress,
 	})
 }
 

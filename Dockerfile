@@ -1,10 +1,11 @@
 # Multi-stage build
 
 # Stage 1: Test and build
-FROM golang:1.25.5-alpine AS builder
+FROM golang:1.25.6-alpine3.21 AS builder
 
 # Install build dependencies
-RUN apk add --no-cache gcc musl-dev sqlite-dev
+RUN apk add --no-cache gcc musl-dev sqlite-dev && \
+    apk update && apk upgrade
 
 WORKDIR /app
 
@@ -18,10 +19,10 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o kvstore ./app
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o kvstore ./app && apk update && apk upgrade
 
 # Stage 2: Runtime
-FROM alpine:latest
+FROM alpine:3.21
 
 # Install runtime dependencies (wget for health checks)
 RUN apk add --no-cache ca-certificates sqlite-libs wget

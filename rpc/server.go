@@ -65,7 +65,7 @@ func (rs *RaftServer) AppendEntries(args *types.AppendEntriesArgs, reply *types.
 }
 
 // Ping is a simple health check endpoint that returns true if the node is alive
-func (rs *RaftServer) Ping(nodeID int, reply *bool) error {
+func (rs *RaftServer) Ping(_ int, reply *bool) error {
 	*reply = true
 	return nil
 }

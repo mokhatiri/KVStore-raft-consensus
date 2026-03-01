@@ -40,55 +40,22 @@ func (h *Handling) HandleCommand(input string) {
 
 	switch command {
 	case "cluster":
-		if len(parts) < 2 {
-			fmt.Println("Usage: cluster <status>")
-			return
-		}
-		subcommand := parts[1]
-		switch subcommand {
-		case "status":
-			h.HandleClusterStatus()
-		default:
-			fmt.Println("Unknown cluster command. Available: status")
-		}
+		h.checkClustercommand(parts)
 
 	case "nodes":
-		if len(parts) < 2 || parts[1] != "list" {
-			fmt.Println("Usage: nodes list")
-			return
-		}
-		h.HandleNodes(parts[1:])
+		h.checkNodesCommand(parts)
 
 	case "node":
-		if len(parts) < 2 {
-			fmt.Println("Usage: node <subcommand> [args]")
-			return
-		}
-		subcommand := parts[1:]
-		h.HandleNode(subcommand)
+		h.checkNodeCommand(parts)
 
 	case "health":
-		if len(parts) < 2 || parts[1] != "check" {
-			fmt.Println("Usage: health check")
-			return
-		}
-		h.HandleHealthCheck()
+		h.checkHealthCommand(parts)
 
 	case "replication":
-		if len(parts) < 2 || parts[1] != "status" {
-			fmt.Println("Usage: replication status")
-			return
-		}
-		h.HandleReplicationStatus()
+		h.checkReplicationCommand(parts)
 
 	case "log":
-		limit := 20 // default
-		if len(parts) > 1 {
-			if l, err := strconv.Atoi(parts[1]); err == nil {
-				limit = l
-			}
-		}
-		h.HandleLog(limit)
+		h.checkLogCommand(parts)
 
 	case "help":
 		HandleHelp()
@@ -103,6 +70,64 @@ func (h *Handling) HandleCommand(input string) {
 	default:
 		fmt.Println("Unknown command. Type 'help' for available commands.")
 	}
+}
+
+func (h *Handling) checkClustercommand(parts []string) {
+	if len(parts) < 2 {
+		fmt.Println("Usage: cluster <status>")
+		return
+	}
+	subcommand := parts[1]
+
+	switch subcommand {
+	case "status":
+		h.HandleClusterStatus()
+	default:
+		fmt.Println("Unknown cluster command. Available: status")
+	}
+}
+
+func (h *Handling) checkNodesCommand(parts []string) {
+	if len(parts) < 2 || parts[1] != "list" {
+		fmt.Println("Usage: nodes list")
+		return
+	}
+	h.HandleNodes(parts[1:])
+}
+
+func (h *Handling) checkNodeCommand(parts []string) {
+	if len(parts) < 2 {
+		fmt.Println("Usage: node <subcommand> [args]")
+		return
+	}
+	subcommand := parts[1:]
+	h.HandleNode(subcommand)
+}
+
+func (h *Handling) checkHealthCommand(parts []string) {
+	if len(parts) < 2 || parts[1] != "check" {
+		fmt.Println("Usage: health check")
+		return
+	}
+	h.HandleHealthCheck()
+}
+
+func (h *Handling) checkReplicationCommand(parts []string) {
+	if len(parts) < 2 || parts[1] != "status" {
+		fmt.Println("Usage: replication status")
+		return
+	}
+	h.HandleReplicationStatus()
+}
+
+func (h *Handling) checkLogCommand(parts []string) {
+	limit := 20 // default
+	if len(parts) > 1 {
+		if l, err := strconv.Atoi(parts[1]); err == nil {
+			limit = l
+		}
+	}
+	h.HandleLog(limit)
 }
 
 func (h *Handling) HandleClusterStatus() {
@@ -136,6 +161,8 @@ func (h *Handling) HandleClusterStatus() {
 	}
 }
 
+var invalidnode = "Invalid node ID was given."
+
 func (h *Handling) HandleNode(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: node <status|register|unregister> [args]")
@@ -152,7 +179,7 @@ func (h *Handling) HandleNode(args []string) {
 		}
 		nodeID, err := strconv.Atoi(args[1])
 		if err != nil {
-			fmt.Println("Invalid node ID")
+			fmt.Println(invalidnode)
 			return
 		}
 		h.printNodeStatus(nodeID)
@@ -164,7 +191,7 @@ func (h *Handling) HandleNode(args []string) {
 		}
 		nodeID, err := strconv.Atoi(args[1])
 		if err != nil {
-			fmt.Println("Invalid node ID")
+			fmt.Println(invalidnode)
 			return
 		}
 		httpAddr := args[3]
@@ -178,7 +205,7 @@ func (h *Handling) HandleNode(args []string) {
 		}
 		nodeID, err := strconv.Atoi(args[1])
 		if err != nil {
-			fmt.Println("Invalid node ID")
+			fmt.Println(invalidnode)
 			return
 		}
 		h.manager.UnregisterNode(nodeID)

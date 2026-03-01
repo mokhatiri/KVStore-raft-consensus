@@ -127,6 +127,10 @@ func startTestServer(consensus types.ConsensusModule, address string) error {
 	return nil
 }
 
+var expected_term = "Expected term %d, got %d"
+var send_request_vote_failed = "SendRequestVote failed: %v"
+var failed_to_start_server = "Failed to start test server: %v"
+
 func TestRequestVoteRPC(t *testing.T) {
 	mockConsensus := &MockConsensus{currentTerm: 1}
 	address := "localhost:9001"
@@ -134,14 +138,14 @@ func TestRequestVoteRPC(t *testing.T) {
 	// Start test server
 	err := startTestServer(mockConsensus, address)
 	if err != nil {
-		t.Fatalf("Failed to start test server: %v", err)
+		t.Fatalf(failed_to_start_server, err)
 	}
 
 	// Make RPC call
-	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, 2)
+	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0)
 
 	if err != nil {
-		t.Fatalf("SendRequestVote failed: %v", err)
+		t.Fatalf(send_request_vote_failed, err)
 	}
 
 	if !granted {
@@ -149,7 +153,7 @@ func TestRequestVoteRPC(t *testing.T) {
 	}
 
 	if term != 2 {
-		t.Errorf("Expected term 2, got %d", term)
+		t.Errorf(expected_term, 2, term)
 	}
 
 	if !mockConsensus.requestVoteCalled {
@@ -164,14 +168,14 @@ func TestRequestVoteRPCLowerTerm(t *testing.T) {
 	// Start test server
 	err := startTestServer(mockConsensus, address)
 	if err != nil {
-		t.Fatalf("Failed to start test server: %v", err)
+		t.Fatalf(failed_to_start_server, err)
 	}
 
 	// Make RPC call with lower term
-	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0, 1, 2)
+	granted, term, err := rpc.SendRequestVote(address, 2, 1, 0, 0)
 
 	if err != nil {
-		t.Fatalf("SendRequestVote failed: %v", err)
+		t.Fatalf(send_request_vote_failed, err)
 	}
 
 	if granted {
@@ -179,7 +183,7 @@ func TestRequestVoteRPCLowerTerm(t *testing.T) {
 	}
 
 	if term != 5 {
-		t.Errorf("Expected term 5, got %d", term)
+		t.Errorf(expected_term, 5, term)
 	}
 }
 
@@ -190,7 +194,7 @@ func TestAppendEntriesRPC(t *testing.T) {
 	// Start test server
 	err := startTestServer(mockConsensus, address)
 	if err != nil {
-		t.Fatalf("Failed to start test server: %v", err)
+		t.Fatalf(failed_to_start_server, err)
 	}
 
 	entries := []types.LogEntry{
@@ -203,7 +207,7 @@ func TestAppendEntriesRPC(t *testing.T) {
 	}
 
 	// Make RPC call
-	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries, 1, 2)
+	success, term, err := rpc.SendAppendEntries(address, 2, 1, 0, 0, 0, entries)
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
@@ -214,7 +218,7 @@ func TestAppendEntriesRPC(t *testing.T) {
 	}
 
 	if term != 2 {
-		t.Errorf("Expected term 2, got %d", term)
+		t.Errorf(expected_term, 2, term)
 	}
 
 	if !mockConsensus.appendEntriesCalled {
@@ -229,11 +233,11 @@ func TestAppendEntriesHeartbeat(t *testing.T) {
 	// Start test server
 	err := startTestServer(mockConsensus, address)
 	if err != nil {
-		t.Fatalf("Failed to start test server: %v", err)
+		t.Fatalf(failed_to_start_server, err)
 	}
 
 	// Send heartbeat (empty entries)
-	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2)
+	success, term, err := rpc.SendAppendEntries(address, 1, 1, 0, 0, 0, []types.LogEntry{})
 
 	if err != nil {
 		t.Fatalf("SendAppendEntries heartbeat failed: %v", err)
@@ -244,13 +248,13 @@ func TestAppendEntriesHeartbeat(t *testing.T) {
 	}
 
 	if term != 1 {
-		t.Errorf("Expected term 1, got %d", term)
+		t.Errorf(expected_term, 1, term)
 	}
 }
 
 func TestRequestVoteConnectionFailure(t *testing.T) {
 	// Try to connect to non-existent server
-	granted, term, err := rpc.SendRequestVote("localhost:9999", 1, 1, 0, 0, 1, 2)
+	granted, term, err := rpc.SendRequestVote("localhost:9999", 1, 1, 0, 0)
 
 	if err == nil {
 		t.Errorf("Expected connection error, but got none")
@@ -261,13 +265,13 @@ func TestRequestVoteConnectionFailure(t *testing.T) {
 	}
 
 	if term != 0 {
-		t.Errorf("Expected term 0 on failure, got %d", term)
+		t.Errorf(expected_term+" (on failure) ", 0, term)
 	}
 }
 
 func TestAppendEntriesConnectionFailure(t *testing.T) {
 	// Try to connect to non-existent server
-	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{}, 1, 2)
+	success, term, err := rpc.SendAppendEntries("localhost:9998", 1, 1, 0, 0, 0, []types.LogEntry{})
 
 	if err == nil {
 		t.Errorf("Expected connection error, but got none")
@@ -278,7 +282,7 @@ func TestAppendEntriesConnectionFailure(t *testing.T) {
 	}
 
 	if term != 0 {
-		t.Errorf("Expected term 0 on failure, got %d", term)
+		t.Errorf(expected_term+" (on failure) ", 0, term)
 	}
 }
 
@@ -313,13 +317,13 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 	// Start test server with real consensus
 	err := startTestServer(raftConsensus, address)
 	if err != nil {
-		t.Fatalf("Failed to start test server: %v", err)
+		t.Fatalf(failed_to_start_server, err)
 	}
 
 	// Test RequestVote
-	granted, term, err := rpc.SendRequestVote(address, 2, 2, 0, 0, 2, 1)
+	granted, term, err := rpc.SendRequestVote(address, 2, 2, 0, 0)
 	if err != nil {
-		t.Fatalf("SendRequestVote failed: %v", err)
+		t.Fatalf(send_request_vote_failed, err)
 	}
 
 	if !granted {
@@ -327,7 +331,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 	}
 
 	if term != 2 {
-		t.Errorf("Expected term 2, got %d", term)
+		t.Errorf(expected_term, 2, term)
 	}
 
 	// Test AppendEntries
@@ -340,7 +344,7 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 		},
 	}
 
-	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries, 2, 3)
+	success, term, err := rpc.SendAppendEntries(address, 2, 2, 0, 0, 0, entries)
 	if err != nil {
 		t.Fatalf("SendAppendEntries failed: %v", err)
 	}
@@ -350,6 +354,6 @@ func TestIntegrationRaftConsensusWithRPC(t *testing.T) {
 	}
 
 	if term != 2 {
-		t.Errorf("Expected term 2, got %d", term)
+		t.Errorf(expected_term, 2, term)
 	}
 }

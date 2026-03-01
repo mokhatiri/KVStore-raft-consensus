@@ -6,10 +6,12 @@ import (
 	"distributed-kv/types"
 )
 
+var notleader error = fmt.Errorf("Error: Not the leader")
+
 func SetHandler(consensus types.ConsensusModule, key, value string) (string, error) {
 	role := consensus.GetRole()
 	if role != "Leader" {
-		return "", fmt.Errorf("Error: Not the leader")
+		return "", notleader
 	}
 
 	// Format command as "SET:key:value"
@@ -23,7 +25,7 @@ func SetHandler(consensus types.ConsensusModule, key, value string) (string, err
 func DeleteHandler(consensus types.ConsensusModule, key string) (string, error) {
 	role := consensus.GetRole()
 	if role != "Leader" {
-		return "", fmt.Errorf("Error: Not the leader")
+		return "", notleader
 	}
 
 	// Format command as "DELETE:key"
@@ -37,7 +39,7 @@ func DeleteHandler(consensus types.ConsensusModule, key string) (string, error) 
 func CleanHandler(consensus types.ConsensusModule) (string, error) {
 	role := consensus.GetRole()
 	if role != "Leader" {
-		return "", fmt.Errorf("Error: Not the leader")
+		return "", notleader
 	}
 
 	// Format command as "CLEAN"
@@ -51,7 +53,7 @@ func CleanHandler(consensus types.ConsensusModule) (string, error) {
 func AddServerHandler(consensus types.ConsensusModule, nodeID int, httpaddress string, rpcaddress string) (string, error) {
 	role := consensus.GetRole()
 	if role != "Leader" {
-		return "", fmt.Errorf("Error: Not the leader")
+		return "", notleader
 	}
 
 	// Attempt to add server to cluster via RequestAddServer
@@ -65,7 +67,7 @@ func AddServerHandler(consensus types.ConsensusModule, nodeID int, httpaddress s
 func RemoveServerHandler(consensus types.ConsensusModule, nodeID int) (string, error) {
 	role := consensus.GetRole()
 	if role != "Leader" {
-		return "", fmt.Errorf("Error: Not the leader")
+		return "", notleader
 	}
 
 	// Attempt to remove server from cluster via RequestRemoveServer

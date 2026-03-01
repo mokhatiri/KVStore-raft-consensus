@@ -12,6 +12,43 @@ import (
 	"distributed-kv/types"
 )
 
+// Test constants to avoid duplication
+const (
+	contentTypeHeader     = "Content-Type"
+	expectedStatus200     = "Expected 200, got %d"
+	expectedStatus204     = "Expected 204, got %d"
+	expectedStatus400     = "Expected 400, got %d"
+	expectedStatus404     = "Expected 404, got %d"
+	expectedStatus405     = "Expected 405, got %d"
+	expectedStatus500     = "Expected 500, got %d"
+	roleLeader            = "Leader"
+	roleFollower          = "Follower"
+	healthEndpoint        = "/health"
+	kvEndpoint            = "/kv/"
+	addServerEndpoint     = "/cluster/add-server/"
+	removeServerEndpoint  = "/cluster/remove-server/"
+	failedParseHealthResp = "Failed to parse health response: %v"
+	failedParseAddResp    = "Failed to parse response: %v"
+	jsonUnmarshalFailed   = "json.Unmarshal failed: %v"
+	expectedHealthy       = "Expected status 'healthy', got '%v'"
+	expectedRoleLeader    = "Expected role 'Leader', got '%v'"
+	expectedRoleFollower  = "Expected role 'Follower', got '%v'"
+	expectedTerm3         = "Expected term 3, got %v"
+	expectedCommitIdx5    = "Expected commitIndex 5, got %v"
+	expectedLogLen10      = "Expected logLength 10, got %v"
+	expectedAddr9090      = "Expected addr ':9090', got '%s'"
+	expectedKey2          = "Expected key 2, got %v"
+	expectedRPCAddr       = "Expected rpc_address 'localhost:8002', got %v"
+	expectedHTTPAddr      = "Expected http_address 'localhost:9002', got %v"
+	expectedNodeID2       = "Expected nodeID 2, got %v"
+	expectedStatusOK      = "http.StatusOK"
+	statusBadRequest      = "http.StatusBadRequest"
+	statusInternalErr     = "http.StatusInternalServerError"
+	rpcAddress            = "localhost:8002"
+	httpAddress           = "localhost:9002"
+	invalidNodeIDMsg      = "Invalid node ID"
+)
+
 // --- Mock ConsensusModule ---
 
 type MockConsensus struct {
@@ -21,7 +58,6 @@ type MockConsensus struct {
 	votedFor    int
 	commitIndex int
 	logLen      int
-	proposeErr  bool
 	store       *storage.Store
 }
 
@@ -79,13 +115,8 @@ func (m *MockConsensus) GetLeader() (int, string) {
 
 // --- Helper to build a test server with mux (not listening) ---
 
-func setupTestServer(mock *MockConsensus) (*NodeServer, *http.ServeMux) {
-	store := storage.NewStore()
-	mock.store = store
-	s := NewNodeServer(mock, ":0", types.NewLogBuffer(100))
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/kv/", func(w http.ResponseWriter, r *http.Request) {
+func setupKVHandler(s *NodeServer) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			if err := s.handleGet(w, r); err != nil {
@@ -100,39 +131,57 @@ func setupTestServer(mock *MockConsensus) (*NodeServer, *http.ServeMux) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 			}
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
 		}
-	})
+	}
+}
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+func setupHealthHandler(s *NodeServer) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		if err := s.handleHealth(w, r); err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		}
-	})
+	}
+}
 
-	mux.HandleFunc("/cluster/add-server/", func(w http.ResponseWriter, r *http.Request) {
+func setupAddServerHandler(s *NodeServer) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		if err := s.handleAddServer(w, r); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to add server: %v", err), http.StatusInternalServerError)
 		}
-	})
+	}
+}
 
-	mux.HandleFunc("/cluster/remove-server/", func(w http.ResponseWriter, r *http.Request) {
+func setupRemoveServerHandler(s *NodeServer) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		if err := s.handleRemoveServer(w, r); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to remove server: %v", err), http.StatusInternalServerError)
 		}
-	})
+	}
+}
+
+func setupTestServer(mock *MockConsensus) (*NodeServer, *http.ServeMux) {
+	store := storage.NewStore()
+	mock.store = store
+	s := NewNodeServer(mock, ":0", types.NewLogBuffer(100))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(kvEndpoint, setupKVHandler(s))
+	mux.HandleFunc(healthEndpoint, setupHealthHandler(s))
+	mux.HandleFunc(addServerEndpoint, setupAddServerHandler(s))
+	mux.HandleFunc(removeServerEndpoint, setupRemoveServerHandler(s))
 
 	return s, mux
 }
@@ -142,24 +191,24 @@ func setupTestServer(mock *MockConsensus) (*NodeServer, *http.ServeMux) {
 // ==============================
 
 func TestGetKeyExists(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	s, mux := setupTestServer(mock)
 
 	// Pre-populate the store
 	store := s.consensus.GetStore().(*storage.Store)
 	store.Set("greeting", "hello")
 
-	req := httptest.NewRequest(http.MethodGet, "/kv/greeting", nil)
+	req := httptest.NewRequest(http.MethodGet, kvEndpoint+"greeting", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d", rr.Code)
+		t.Fatalf(expectedStatus200, rr.Code)
 	}
 
 	var body map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
+		t.Fatalf(failedParseAddResp, err)
 	}
 	if body["key"] != "greeting" {
 		t.Errorf("Expected key 'greeting', got '%v'", body["key"])
@@ -170,10 +219,10 @@ func TestGetKeyExists(t *testing.T) {
 }
 
 func TestGetKeyNotFound(t *testing.T) {
-	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleFollower, term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodGet, "/kv/nonexistent", nil)
+	req := httptest.NewRequest(http.MethodGet, kvEndpoint+"nonexistent", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -183,17 +232,17 @@ func TestGetKeyNotFound(t *testing.T) {
 }
 
 func TestGetContentType(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	s, mux := setupTestServer(mock)
 	store := s.consensus.GetStore().(*storage.Store)
 	store.Set("key1", "val1")
 
-	req := httptest.NewRequest(http.MethodGet, "/kv/key1", nil)
+	req := httptest.NewRequest(http.MethodGet, kvEndpoint+"key1", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
-	ct := rr.Header().Get("Content-Type")
-	if ct != "application/json" {
+	ct := rr.Header().Get(contentTypeHeader)
+	if ct != contentTypeJSON {
 		t.Errorf("Expected Content-Type 'application/json', got '%s'", ct)
 	}
 }
@@ -203,22 +252,22 @@ func TestGetContentType(t *testing.T) {
 // ==============================
 
 func TestSetKeyAsLeader(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
 	body := `{"value": "world"}`
-	req := httptest.NewRequest(http.MethodPost, "/kv/hello", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, kvEndpoint+"hello", strings.NewReader(body))
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+		t.Fatalf(expectedStatus200, rr.Code)
 	}
 
 	var respBody map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &respBody); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
+		t.Fatalf(failedParseAddResp, err)
 	}
 	if respBody["key"] != "hello" {
 		t.Errorf("Expected key 'hello', got '%v'", respBody["key"])
@@ -226,12 +275,12 @@ func TestSetKeyAsLeader(t *testing.T) {
 }
 
 func TestSetKeyAsFollower(t *testing.T) {
-	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2}
+	mock := &MockConsensus{role: roleFollower, term: 1, nodeID: 2}
 	_, mux := setupTestServer(mock)
 
 	body := `{"value": "world"}`
-	req := httptest.NewRequest(http.MethodPost, "/kv/hello", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, kvEndpoint+"hello", strings.NewReader(body))
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -241,28 +290,28 @@ func TestSetKeyAsFollower(t *testing.T) {
 }
 
 func TestSetKeyInvalidBody(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodPost, "/kv/hello", strings.NewReader("not json"))
+	req := httptest.NewRequest(http.MethodPost, kvEndpoint+"hello", strings.NewReader("not json"))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("Expected 400 for invalid body, got %d", rr.Code)
+		t.Fatalf(expectedStatus400, rr.Code)
 	}
 }
 
 func TestSetKeyEmptyBody(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodPost, "/kv/hello", strings.NewReader(""))
+	req := httptest.NewRequest(http.MethodPost, kvEndpoint+"hello", strings.NewReader(""))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("Expected 400 for empty body, got %d", rr.Code)
+		t.Fatalf(expectedStatus400, rr.Code)
 	}
 }
 
@@ -271,28 +320,28 @@ func TestSetKeyEmptyBody(t *testing.T) {
 // ==============================
 
 func TestDeleteKeyAsLeader(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodDelete, "/kv/somekey", nil)
+	req := httptest.NewRequest(http.MethodDelete, kvEndpoint+"somekey", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNoContent {
-		t.Fatalf("Expected 204, got %d; body: %s", rr.Code, rr.Body.String())
+		t.Fatalf(expectedStatus204, rr.Code)
 	}
 }
 
 func TestDeleteKeyAsFollower(t *testing.T) {
-	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 2}
+	mock := &MockConsensus{role: roleFollower, term: 1, nodeID: 2}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodDelete, "/kv/somekey", nil)
+	req := httptest.NewRequest(http.MethodDelete, kvEndpoint+"somekey", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("Expected 404 (not leader), got %d", rr.Code)
+		t.Fatalf(expectedStatus404, rr.Code)
 	}
 }
 
@@ -301,28 +350,28 @@ func TestDeleteKeyAsFollower(t *testing.T) {
 // ==============================
 
 func TestKVMethodNotAllowed(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodPatch, "/kv/hello", nil)
+	req := httptest.NewRequest(http.MethodPatch, kvEndpoint+"hello", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("Expected 405, got %d", rr.Code)
+		t.Fatalf(expectedStatus405, rr.Code)
 	}
 }
 
 func TestHealthMethodNotAllowed(t *testing.T) {
-	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
+	mock := &MockConsensus{role: roleLeader, term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	req := httptest.NewRequest(http.MethodPost, healthEndpoint, nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("Expected 405, got %d", rr.Code)
+		t.Fatalf(expectedStatus405, rr.Code)
 	}
 }
 
@@ -332,7 +381,7 @@ func TestHealthMethodNotAllowed(t *testing.T) {
 
 func TestHealthEndpoint(t *testing.T) {
 	mock := &MockConsensus{
-		role:        "Leader",
+		role:        roleLeader,
 		term:        3,
 		nodeID:      1,
 		votedFor:    1,
@@ -341,34 +390,34 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, healthEndpoint, nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d", rr.Code)
+		t.Fatalf(expectedStatus200, rr.Code)
 	}
 
 	var body map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("Failed to parse health response: %v", err)
+		t.Fatalf(failedParseHealthResp, err)
 	}
 
 	if body["status"] != "healthy" {
-		t.Errorf("Expected status 'healthy', got '%v'", body["status"])
+		t.Errorf(expectedHealthy, body["status"])
 	}
-	if body["role"] != "Leader" {
-		t.Errorf("Expected role 'Leader', got '%v'", body["role"])
+	if body["role"] != roleLeader {
+		t.Errorf("Expected role '%s', got '%v'", roleLeader, body["role"])
 	}
 	// JSON numbers decode as float64
 	if body["term"] != float64(3) {
-		t.Errorf("Expected term 3, got %v", body["term"])
+		t.Errorf(expectedTerm3, body["term"])
 	}
 	if body["commitIndex"] != float64(5) {
-		t.Errorf("Expected commitIndex 5, got %v", body["commitIndex"])
+		t.Errorf(expectedCommitIdx5, body["commitIndex"])
 	}
 	if body["logLength"] != float64(10) {
-		t.Errorf("Expected logLength 10, got %v", body["logLength"])
+		t.Errorf(expectedLogLen10, body["logLength"])
 	}
 }
 
@@ -386,13 +435,15 @@ func TestHealthEndpointFollowerStatus(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d", rr.Code)
+		t.Fatalf(expectedStatus200, rr.Code)
 	}
 
 	var body map[string]any
-	json.Unmarshal(rr.Body.Bytes(), &body)
-	if body["role"] != "Follower" {
-		t.Errorf("Expected role 'Follower', got '%v'", body["role"])
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf(jsonUnmarshalFailed, err)
+	}
+	if body["role"] != roleFollower {
+		t.Errorf("Expected role '%s', got '%v'", roleFollower, body["role"])
 	}
 }
 
@@ -400,13 +451,13 @@ func TestHealthContentType(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req := httptest.NewRequest(http.MethodGet, kvEndpoint+"key1", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
-	ct := rr.Header().Get("Content-Type")
-	if ct != "application/json" {
-		t.Errorf("Expected Content-Type 'application/json', got '%s'", ct)
+	ct := rr.Header().Get(contentTypeHeader)
+	if ct != contentTypeJSON {
+		t.Errorf("Expected Content-Type '%s', got '%s'", contentTypeJSON, ct)
 	}
 }
 
@@ -460,11 +511,13 @@ func TestGetAfterSet(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("Expected 200, got %d", rr.Code)
+		t.Fatalf(expectedStatus200, rr.Code)
 	}
 
 	var body map[string]any
-	json.Unmarshal(rr.Body.Bytes(), &body)
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf(jsonUnmarshalFailed, err)
+	}
 	if body["value"] != "raft" {
 		t.Errorf("Expected 'raft', got '%v'", body["value"])
 	}
@@ -525,8 +578,8 @@ func TestAddServerAsLeader(t *testing.T) {
 		"http_address": "localhost:9002"
 	}`)
 
-	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/2", reqBody)
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, addServerEndpoint+"2", reqBody)
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -536,7 +589,7 @@ func TestAddServerAsLeader(t *testing.T) {
 
 	var body map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
+		t.Fatalf(failedParseAddResp, err)
 	}
 
 	if body["key"] != float64(2) {
@@ -561,13 +614,13 @@ func TestAddServerAsFollower(t *testing.T) {
 		"http_address": "localhost:9002"
 	}`)
 
-	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/2", reqBody)
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, addServerEndpoint+"2", reqBody)
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("Expected 500, got %d", rr.Code)
+		t.Fatalf(expectedStatus500, rr.Code)
 	}
 }
 
@@ -580,13 +633,13 @@ func TestAddServerInvalidNodeID(t *testing.T) {
 		"http_address": "localhost:9002"
 	}`)
 
-	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/invalid", reqBody)
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, addServerEndpoint+"invalid", reqBody)
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("Expected 400, got %d", rr.Code)
+		t.Fatalf(expectedStatus400, rr.Code)
 	}
 }
 
@@ -596,13 +649,13 @@ func TestAddServerInvalidJSON(t *testing.T) {
 
 	reqBody := strings.NewReader(`{invalid json}`)
 
-	req := httptest.NewRequest(http.MethodPost, "/cluster/add-server/2", reqBody)
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, addServerEndpoint+"2", reqBody)
+	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("Expected 400, got %d", rr.Code)
+		t.Fatalf(expectedStatus400, rr.Code)
 	}
 }
 
@@ -610,12 +663,12 @@ func TestAddServerMethodNotAllowed(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodGet, "/cluster/add-server/2", nil)
+	req := httptest.NewRequest(http.MethodGet, addServerEndpoint+"2", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("Expected 405, got %d", rr.Code)
+		t.Fatalf(expectedStatus405, rr.Code)
 	}
 }
 
@@ -627,7 +680,7 @@ func TestRemoveServerAsLeader(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodPost, "/cluster/remove-server/2", nil)
+	req := httptest.NewRequest(http.MethodPost, removeServerEndpoint+"2", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
@@ -637,7 +690,7 @@ func TestRemoveServerAsLeader(t *testing.T) {
 
 	var body map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
+		t.Fatalf(failedParseAddResp, err)
 	}
 
 	if body["nodeID"] != float64(2) {
@@ -649,12 +702,12 @@ func TestRemoveServerAsFollower(t *testing.T) {
 	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodPost, "/cluster/remove-server/2", nil)
+	req := httptest.NewRequest(http.MethodPost, removeServerEndpoint+"2", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("Expected 500, got %d", rr.Code)
+		t.Fatalf(expectedStatus500, rr.Code)
 	}
 }
 
@@ -662,12 +715,12 @@ func TestRemoveServerInvalidNodeID(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodPost, "/cluster/remove-server/invalid", nil)
+	req := httptest.NewRequest(http.MethodPost, removeServerEndpoint+"invalid", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("Expected 400, got %d", rr.Code)
+		t.Fatalf(expectedStatus400, rr.Code)
 	}
 }
 
@@ -675,11 +728,11 @@ func TestRemoveServerMethodNotAllowed(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodGet, "/cluster/remove-server/2", nil)
+	req := httptest.NewRequest(http.MethodGet, removeServerEndpoint+"2", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("Expected 405, got %d", rr.Code)
+		t.Fatalf(expectedStatus405, rr.Code)
 	}
 }

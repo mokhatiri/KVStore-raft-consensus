@@ -8,6 +8,34 @@ import (
 	"time"
 )
 
+// Test constants to avoid duplication
+const (
+	localhost8001           = "localhost:8001"
+	localhost8002           = "localhost:8002"
+	localhost9001           = "localhost:9001"
+	localhost9002           = "localhost:9002"
+	localhost8004           = "localhost:8004"
+	localhost9004           = "localhost:9004"
+	expectedUnexpErr        = "Unexpected error: %v"
+	expectedNilError        = "Expected error when not leader"
+	expectedAddServer       = "RequestAddServer failed: %v"
+	expectedRemoveServ      = "RequestRemoveServer failed: %v"
+	expectedFinalize        = "FinalizeConfigChange failed: %v"
+	expectedTerm            = "Expected term %d, got %d"
+	expectedVotedFor        = "Expected votedFor to be %d, got %d"
+	expectedRole            = "Expected role '%s', got '%s'"
+	expectedLogLen          = "Expected %d log entries, got %d"
+	expectedCommand         = "Expected command '%s', got '%s'"
+	expectedConfigChangeSet = "Expected ConfigChange field to be set"
+	addServerCmd            = "AddServer"
+	removeServerCmd         = "RemoveServer"
+	configChangeCmd         = "CONFIG_CHANGE"
+	finalizeConfigCmd       = "FinalizeConfig"
+	followerRole            = "Follower"
+	leaderRole              = "Leader"
+	candidateRole           = "Candidate"
+)
+
 // setupTestNode creates a node and a RaftConsensus instance using a temporary
 // directory for the persister so that tests are fully isolated from each other
 // and from any on-disk state left by previous runs.
@@ -15,9 +43,9 @@ func setupTestNode(id int) *types.Node {
 	node := &types.Node{
 		ID:        id,
 		Address:   "localhost:8000",
-		Peers:     map[int]string{1: "localhost:8001", 2: "localhost:8002"},
-		PeersHttp: map[int]string{1: "localhost:9001", 2: "localhost:9002"},
-		Role:      "Follower",
+		Peers:     map[int]string{1: localhost8001, 2: localhost8002},
+		PeersHttp: map[int]string{1: localhost9001, 2: localhost9002},
+		Role:      followerRole,
 		Log:       []types.LogEntry{},
 		CommitIdx: 0,
 		Mu:        sync.RWMutex{},
@@ -181,7 +209,9 @@ func TestAppendEntriesAppendsToLog(t *testing.T) {
 		},
 	}
 
-	rc.AppendEntries(1, 2, 0, 0, 0, entries)
+	if err := rc.AppendEntries(1, 2, 0, 0, 0, entries); err != nil {
+		t.Fatalf("AppendEntries failed: %v", err)
+	}
 
 	// Check if entries were appended to node.Log
 	node.Mu.RLock()
@@ -217,7 +247,7 @@ func TestProposeAsLeader(t *testing.T) {
 	// Make node a leader
 	rc.currentTerm = 1
 	node.Mu.Lock()
-	node.Role = "Leader"
+	node.Role = leaderRole
 	node.Mu.Unlock()
 
 	index, term, isLeader := rc.Propose("SET:mykey:myvalue")
@@ -248,7 +278,7 @@ func TestProposeAsLeader(t *testing.T) {
 		t.Errorf("Expected value 'myvalue', got '%v'", entry.Value)
 	}
 	if entry.Command != "SET" {
-		t.Errorf("Expected command 'SET', got '%s'", entry.Command)
+		t.Errorf(expectedCommand, "SET", entry.Command)
 	}
 }
 
@@ -280,7 +310,7 @@ func TestProposeMultipleEntries(t *testing.T) {
 
 	rc.currentTerm = 1
 	node.Mu.Lock()
-	node.Role = "Leader"
+	node.Role = leaderRole
 	node.Mu.Unlock()
 
 	rc.Propose("SET:k1:v1")
@@ -308,8 +338,8 @@ func TestGetNodeStatus(t *testing.T) {
 	if id != 1 {
 		t.Errorf("Expected node ID 1, got %d", id)
 	}
-	if role != "Follower" {
-		t.Errorf("Expected role 'Follower', got '%s'", role)
+	if role != followerRole {
+		t.Errorf(expectedRole, followerRole, role)
 	}
 	if commitIdx != 0 {
 		t.Errorf("Expected commitIdx 0, got %d", commitIdx)
@@ -322,16 +352,16 @@ func TestGetNodeStatus(t *testing.T) {
 func TestGetRole(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
 
-	if rc.GetRole() != "Follower" {
-		t.Errorf("Expected initial role 'Follower', got '%s'", rc.GetRole())
+	if rc.GetRole() != followerRole {
+		t.Errorf("Expected initial role '%s', got '%s'", followerRole, rc.GetRole())
 	}
 
 	node.Mu.Lock()
-	node.Role = "Leader"
+	node.Role = leaderRole
 	node.Mu.Unlock()
 
-	if rc.GetRole() != "Leader" {
-		t.Errorf("Expected role 'Leader', got '%s'", rc.GetRole())
+	if rc.GetRole() != leaderRole {
+		t.Errorf(expectedRole, leaderRole, rc.GetRole())
 	}
 }
 
@@ -353,13 +383,13 @@ func TestAppendEntriesUpdatesCommitIndex(t *testing.T) {
 	}
 	err := rc.AppendEntries(1, 2, 0, 0, 0, entries)
 	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+		t.Fatalf(expectedUnexpErr, err)
 	}
 
 	// Now send heartbeat with leaderCommit=2 to advance commit index
 	err = rc.AppendEntries(1, 2, 2, 1, 2, []types.LogEntry{})
 	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+		t.Fatalf(expectedUnexpErr, err)
 	}
 
 	node.Mu.RLock()
@@ -376,21 +406,21 @@ func TestAppendEntriesStepsDownCandidate(t *testing.T) {
 
 	// Make the node a candidate
 	node.Mu.Lock()
-	node.Role = "Candidate"
+	node.Role = candidateRole
 	node.Mu.Unlock()
 
 	// Receive AppendEntries from a leader with same term
 	err := rc.AppendEntries(1, 2, 0, 0, 0, []types.LogEntry{})
 	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+		t.Fatalf(expectedUnexpErr, err)
 	}
 
 	node.Mu.RLock()
 	role := node.Role
 	node.Mu.RUnlock()
 
-	if role != "Follower" {
-		t.Errorf("Expected candidate to step down to Follower, got '%s'", role)
+	if role != followerRole {
+		t.Errorf("Expected candidate to step down to %s, got '%s'", followerRole, role)
 	}
 }
 
@@ -421,13 +451,13 @@ func TestRequestVoteLogCompleteness(t *testing.T) {
 
 func TestRequestAddServer(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
-	node.Role = "Leader"
+	node.Role = leaderRole
 	rc.currentTerm = 1
 
 	// Request to add server 4 (not in the initial peer list)
-	err := rc.RequestAddServer(4, "localhost:8004", "localhost:9004")
+	err := rc.RequestAddServer(4, localhost8004, localhost9004)
 	if err != nil {
-		t.Fatalf("RequestAddServer failed: %v", err)
+		t.Fatalf(expectedAddServer, err)
 	}
 
 	// Check that a log entry was created with CONFIG_CHANGE command
@@ -436,46 +466,46 @@ func TestRequestAddServer(t *testing.T) {
 	}
 
 	lastEntry := node.Log[len(node.Log)-1]
-	if lastEntry.Command != "CONFIG_CHANGE" {
-		t.Errorf("Expected command 'CONFIG_CHANGE', got '%s'", lastEntry.Command)
+	if lastEntry.Command != configChangeCmd {
+		t.Errorf(expectedCommand, configChangeCmd, lastEntry.Command)
 	}
 
 	if lastEntry.ConfigChange == nil {
-		t.Fatal("Expected ConfigChange field to be set")
+		t.Fatal(expectedConfigChangeSet)
 	}
 
-	if lastEntry.ConfigChange.Type != "AddServer" {
-		t.Errorf("Expected ConfigChange.Type 'AddServer', got '%s'", lastEntry.ConfigChange.Type)
+	if lastEntry.ConfigChange.Type != addServerCmd {
+		t.Errorf("Expected ConfigChange.Type '%s', got '%s'", addServerCmd, lastEntry.ConfigChange.Type)
 	}
 
 	if lastEntry.ConfigChange.NodeID != 4 {
 		t.Errorf("Expected NodeID 4, got %d", lastEntry.ConfigChange.NodeID)
 	}
 
-	if lastEntry.ConfigChange.Address != "localhost:9004" {
-		t.Errorf("Expected Address 'localhost:9004', got '%s'", lastEntry.ConfigChange.Address)
+	if lastEntry.ConfigChange.Address != localhost9004 {
+		t.Errorf("Expected Address '%s', got '%s'", localhost9004, lastEntry.ConfigChange.Address)
 	}
 }
 
 func TestRequestAddServerNotLeader(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
-	node.Role = "Follower" // Not leader
+	node.Role = followerRole // Not leader
 
-	err := rc.RequestAddServer(2, "localhost:8002", "localhost:9002")
+	err := rc.RequestAddServer(2, localhost8002, localhost9002)
 	if err == nil {
-		t.Fatal("Expected error when not leader")
+		t.Fatal(expectedNilError)
 	}
 }
 
 func TestRequestRemoveServer(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
-	node.Role = "Leader"
+	node.Role = leaderRole
 	rc.currentTerm = 1
 
 	// Request to remove server 2
 	err := rc.RequestRemoveServer(2)
 	if err != nil {
-		t.Fatalf("RequestRemoveServer failed: %v", err)
+		t.Fatalf(expectedRemoveServ, err)
 	}
 
 	// Check that a log entry was created with CONFIG_CHANGE command
@@ -484,16 +514,16 @@ func TestRequestRemoveServer(t *testing.T) {
 	}
 
 	lastEntry := node.Log[len(node.Log)-1]
-	if lastEntry.Command != "CONFIG_CHANGE" {
-		t.Errorf("Expected command 'CONFIG_CHANGE', got '%s'", lastEntry.Command)
+	if lastEntry.Command != configChangeCmd {
+		t.Errorf(expectedCommand, configChangeCmd, lastEntry.Command)
 	}
 
 	if lastEntry.ConfigChange == nil {
-		t.Fatal("Expected ConfigChange field to be set")
+		t.Fatal(expectedConfigChangeSet)
 	}
 
-	if lastEntry.ConfigChange.Type != "RemoveServer" {
-		t.Errorf("Expected ConfigChangeType 'RemoveServer', got '%s'", lastEntry.ConfigChange.Type)
+	if lastEntry.ConfigChange.Type != removeServerCmd {
+		t.Errorf("Expected ConfigChangeType '%s', got '%s'", removeServerCmd, lastEntry.ConfigChange.Type)
 	}
 
 	if lastEntry.ConfigChange.NodeID != 2 {
@@ -503,29 +533,29 @@ func TestRequestRemoveServer(t *testing.T) {
 
 func TestRequestRemoveServerNotLeader(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
-	node.Role = "Follower" // Not leader
+	node.Role = followerRole // Not leader
 
 	err := rc.RequestRemoveServer(2)
 	if err == nil {
-		t.Fatal("Expected error when not leader")
+		t.Fatal(expectedNilError)
 	}
 }
 
 func TestFinaliseConfigChange(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
-	node.Role = "Leader"
+	node.Role = leaderRole
 	rc.currentTerm = 1
 
 	// First add a server to set configState (using node 4 which is not in the initial config)
-	err := rc.RequestAddServer(4, "localhost:8004", "localhost:9004")
+	err := rc.RequestAddServer(4, localhost8004, localhost9004)
 	if err != nil {
-		t.Fatalf("RequestAddServer failed: %v", err)
+		t.Fatalf(expectedAddServer, err)
 	}
 
 	// Now finalize the config change
 	err = rc.FinaliseConfigChange()
 	if err != nil {
-		t.Fatalf("FinaliseConfigChange failed: %v", err)
+		t.Fatalf(expectedFinalize, err)
 	}
 
 	// Check that a finalize entry was created
@@ -534,25 +564,25 @@ func TestFinaliseConfigChange(t *testing.T) {
 	}
 
 	finalEntry := node.Log[len(node.Log)-1]
-	if finalEntry.Command != "CONFIG_CHANGE" {
-		t.Errorf("Expected command 'CONFIG_CHANGE', got '%s'", finalEntry.Command)
+	if finalEntry.Command != configChangeCmd {
+		t.Errorf(expectedCommand, configChangeCmd, finalEntry.Command)
 	}
 
 	if finalEntry.ConfigChange == nil {
-		t.Fatal("Expected ConfigChange field to be set")
+		t.Fatal(expectedConfigChangeSet)
 	}
 
-	if finalEntry.ConfigChange.Type != "FinalizeConfig" {
-		t.Errorf("Expected ConfigChangeType 'FinalizeConfig', got '%s'", finalEntry.ConfigChange.Type)
+	if finalEntry.ConfigChange.Type != finalizeConfigCmd {
+		t.Errorf("Expected ConfigChangeType '%s', got '%s'", finalizeConfigCmd, finalEntry.ConfigChange.Type)
 	}
 }
 
 func TestFinaliseConfigChangeNotLeader(t *testing.T) {
 	node, rc := setupTestRaft(t, 1)
-	node.Role = "Follower" // Not leader
+	node.Role = followerRole // Not leader
 
 	err := rc.FinaliseConfigChange()
 	if err == nil {
-		t.Fatal("Expected error when not leader")
+		t.Fatal(expectedNilError)
 	}
 }

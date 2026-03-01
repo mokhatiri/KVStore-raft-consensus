@@ -67,16 +67,20 @@ func (m *MockConsensus) GetLeader() (int, string) {
 // SetHandler
 // ==============================
 
+var got_err = "Expected no error, got: %v"
+var expected_1_err = "Expected 1 proposed command, got %d"
+var expected_err = "Expected error for non-leader, got nil"
+
 func TestSetHandlerAsLeader(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1, store: storage.NewStore()}
 
 	_, err := SetHandler(mock, "name", "alice")
 	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
+		t.Fatalf(got_err, err)
 	}
 
 	if len(mock.proposed) != 1 {
-		t.Fatalf("Expected 1 proposed command, got %d", len(mock.proposed))
+		t.Fatalf(expected_1_err, len(mock.proposed))
 	}
 	expected := "SET:name:alice"
 	if mock.proposed[0] != expected {
@@ -89,7 +93,7 @@ func TestSetHandlerAsFollower(t *testing.T) {
 
 	_, err := SetHandler(mock, "name", "alice")
 	if err == nil {
-		t.Fatal("Expected error for non-leader, got nil")
+		t.Fatal(expected_err)
 	}
 
 	if len(mock.proposed) != 0 {
@@ -115,11 +119,11 @@ func TestDeleteHandlerAsLeader(t *testing.T) {
 
 	_, err := DeleteHandler(mock, "mykey")
 	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
+		t.Fatalf(got_err, err)
 	}
 
 	if len(mock.proposed) != 1 {
-		t.Fatalf("Expected 1 proposed command, got %d", len(mock.proposed))
+		t.Fatalf(expected_1_err, len(mock.proposed))
 	}
 	expected := "DELETE:mykey"
 	if mock.proposed[0] != expected {
@@ -132,7 +136,7 @@ func TestDeleteHandlerAsFollower(t *testing.T) {
 
 	_, err := DeleteHandler(mock, "mykey")
 	if err == nil {
-		t.Fatal("Expected error for non-leader, got nil")
+		t.Fatal(expected_err)
 	}
 
 	if len(mock.proposed) != 0 {
@@ -149,11 +153,11 @@ func TestCleanHandlerAsLeader(t *testing.T) {
 
 	_, err := CleanHandler(mock)
 	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
+		t.Fatalf(got_err, err)
 	}
 
 	if len(mock.proposed) != 1 {
-		t.Fatalf("Expected 1 proposed command, got %d", len(mock.proposed))
+		t.Fatalf(expected_1_err, len(mock.proposed))
 	}
 	if mock.proposed[0] != "CLEAN" {
 		t.Errorf("Expected proposed command 'CLEAN', got '%s'", mock.proposed[0])
@@ -165,7 +169,7 @@ func TestCleanHandlerAsFollower(t *testing.T) {
 
 	_, err := CleanHandler(mock)
 	if err == nil {
-		t.Fatal("Expected error for non-leader, got nil")
+		t.Fatal(expected_err)
 	}
 }
 
@@ -197,12 +201,15 @@ func TestMultipleProposals(t *testing.T) {
 // AddServerHandler
 // ==============================
 
+var rcpaddress = "localhost:9002"
+var httpaddress = "localhost:8002"
+
 func TestAddServerHandlerAsLeader(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1, store: storage.NewStore()}
 
-	msg, err := AddServerHandler(mock, 2, "localhost:9002", "localhost:8002")
+	msg, err := AddServerHandler(mock, 2, rcpaddress, httpaddress)
 	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
+		t.Fatalf(got_err, err)
 	}
 
 	if msg == "" {
@@ -217,9 +224,9 @@ func TestAddServerHandlerAsLeader(t *testing.T) {
 func TestAddServerHandlerAsFollower(t *testing.T) {
 	mock := &MockConsensus{role: "Follower", term: 1, nodeID: 3, store: storage.NewStore()}
 
-	_, err := AddServerHandler(mock, 2, "localhost:9002", "localhost:8002")
+	_, err := AddServerHandler(mock, 2, rcpaddress, httpaddress)
 	if err == nil {
-		t.Fatal("Expected error for non-leader, got nil")
+		t.Fatal(expected_err)
 	}
 
 	if !strings.Contains(err.Error(), "leader") {
@@ -230,7 +237,7 @@ func TestAddServerHandlerAsFollower(t *testing.T) {
 func TestAddServerHandlerAsCandidate(t *testing.T) {
 	mock := &MockConsensus{role: "Candidate", term: 1, nodeID: 1, store: storage.NewStore()}
 
-	_, err := AddServerHandler(mock, 2, "localhost:9002", "localhost:8002")
+	_, err := AddServerHandler(mock, 2, rcpaddress, httpaddress)
 	if err == nil {
 		t.Fatal("Expected error for non-leader candidate, got nil")
 	}
@@ -245,7 +252,7 @@ func TestRemoveServerHandlerAsLeader(t *testing.T) {
 
 	msg, err := RemoveServerHandler(mock, 2)
 	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
+		t.Fatalf(got_err, err)
 	}
 
 	if msg == "" {
@@ -262,7 +269,7 @@ func TestRemoveServerHandlerAsFollower(t *testing.T) {
 
 	_, err := RemoveServerHandler(mock, 2)
 	if err == nil {
-		t.Fatal("Expected error for non-leader, got nil")
+		t.Fatal(expected_err)
 	}
 
 	if !strings.Contains(err.Error(), "leader") {

@@ -90,6 +90,8 @@ type Config struct {
 	} `json:"manager"`
 }
 
+var ErrorMsg = "Failed to parse config file: %v"
+
 func parseManagerArgs() (string, Config) {
 	// get the config file path from command line arguments
 	configPtr := flag.String("config", "cluster.json", "Path to config file")
@@ -103,7 +105,7 @@ func parseManagerArgs() (string, Config) {
 	var config Config
 	err = json.Unmarshal(data, &config)
 	if err != nil {
-		log.Fatalf("Failed to parse config JSON: %v", err)
+		log.Fatalf(ErrorMsg, err)
 	}
 
 	return config.ManagerAddress.HTTPAddr, config
@@ -124,7 +126,7 @@ func parseNodeArgs() (int, string, string, string, string, bool) {
 	var config Config
 	err = json.Unmarshal(data, &config)
 	if err != nil {
-		log.Fatalf("Failed to parse config JSON: %v", err)
+		log.Fatalf(ErrorMsg, err)
 	}
 
 	// Find this node's configuration in the config file
@@ -153,93 +155,99 @@ func parseNodeArgs() (int, string, string, string, string, bool) {
 }
 
 func Nodestart(id int, address string, pprofServer string, apiHTTPAddress string, configFile string, useDB bool) *consensus.RaftConsensus {
-	// create the key-value store
 	store := storage.NewStore()
+	persister := createPersister(id, store, useDB)
+	peers, peershttp := loadPeers(id, configFile)
 
-	// Create persister based on flag
-	var persister types.Persister
+	newNode := types.NewNode(id, address, peers, peershttp)
+	raftConsensus := consensus.NewRaftConsensus(newNode, store, persister)
+
+	startRPCServer(raftConsensus, address)
+	startPprofServer(id, pprofServer)
+	startRaftConsensus(id, raftConsensus, store)
+
+	return raftConsensus
+}
+
+func createPersister(id int, store *storage.Store, useDB bool) types.Persister {
 	if useDB {
 		log.Println("Using SQLite database for persistence")
 		dbPersister, err := storage.NewDatabasePersister(id, ".")
 		if err != nil {
 			log.Fatalf("Failed to create database persister: %v", err)
 		}
-		persister = dbPersister
-		// Update store to use database persister
 		store.SetPersister(dbPersister)
-	} else {
-		log.Println("Using JSON files for persistence")
-		persister = nil // will default to JSONPersister in NewRaftConsensus
+		return dbPersister
 	}
+	log.Println("Using JSON files for persistence")
+	return nil
+}
 
-	// Determine initial peers list using maps
-	peers := make(map[int]string)     // PeerID -> RPC address
-	peershttp := make(map[int]string) // PeerID -> HTTP address
+func loadPeers(id int, configFile string) (map[int]string, map[int]string) {
+	peers := make(map[int]string)
+	peershttp := make(map[int]string)
 
-	if configFile != "" {
-		// Static mode: load peers from config file
-		log.Println("Loading peers from config file:", configFile)
-		data, err := os.ReadFile(configFile)
-		if err != nil {
-			log.Fatalf("Failed to read config file: %v", err)
-		}
-
-		var config Config
-		err = json.Unmarshal(data, &config)
-		if err != nil {
-			log.Fatalf("Failed to parse config JSON: %v", err)
-		}
-
-		for _, node := range config.Nodes {
-			if node.ID != id { // exclude self
-				peers[node.ID] = node.RPCAddr
-				peershttp[node.ID] = node.HTTPAddr
-			}
-		}
-	} else {
-		// Dynamic mode: start with empty peers, will fetch from manager after registering
+	if configFile == "" {
 		log.Println("Starting in dynamic mode, peers will be fetched from manager after registration")
+		return peers, peershttp
 	}
 
-	// create a new node and Raft consensus module
-	newNode := types.NewNode(id, address, peers, peershttp)
-	raftConsensus := consensus.NewRaftConsensus(newNode, store, persister)
+	log.Println("Loading peers from config file:", configFile)
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		log.Fatalf("Failed to read config file: %v", err)
+	}
 
-	// start the RPC server early so it's ready to receive connections
+	var config Config
+	err = json.Unmarshal(data, &config)
+	if err != nil {
+		log.Fatalf(ErrorMsg, err)
+	}
+
+	for _, node := range config.Nodes {
+		if node.ID != id {
+			peers[node.ID] = node.RPCAddr
+			peershttp[node.ID] = node.HTTPAddr
+		}
+	}
+
+	return peers, peershttp
+}
+
+func startRPCServer(raftConsensus *consensus.RaftConsensus, address string) {
 	log.Println("------------------- Starting RPC Server ---------------------")
-	appRpc.StartServer(raftConsensus, address)
-
+	if err := appRpc.StartServer(raftConsensus, address); err != nil {
+		log.Fatalf("Failed to start RPC server: %v", err)
+	}
 	time.Sleep(500 * time.Millisecond)
 	log.Println("RPC server started on", address)
 	log.Println("------------------- RPC Server Started ---------------------")
-	// rpc done
+}
 
-	// Start pprof server for debugging goroutines/deadlocks
+func startPprofServer(id int, pprofServer string) {
 	log.Println("------------------- Starting pprof Server ---------------------")
 	if pprofServer == "" {
 		log.Println("[Node", id, "] No pprof server address provided, skipping pprof server startup")
 		log.Println("------------------- pprof Server Skipped ---------------------")
-	} else {
-		go func() {
-			log.Println("[Node", id, "] pprof server started on http://"+pprofServer+"/debug/pprof/")
-			if err := http.ListenAndServe(pprofServer, nil); err != nil {
-				log.Println("[Node", id, "] pprof server error:", err)
-			}
-		}()
-		log.Println("------------------- pprof Server Started ---------------------")
+		return
 	}
-	time.Sleep(100 * time.Millisecond)
-	// pprof done
 
-	// start the Raft consensus module
+	go func() {
+		log.Println("[Node", id, "] pprof server started on http://"+pprofServer+"/debug/pprof/")
+		if err := http.ListenAndServe(pprofServer, nil); err != nil {
+			log.Println("[Node", id, "] pprof server error:", err)
+		}
+	}()
+	log.Println("------------------- pprof Server Started ---------------------")
+	time.Sleep(100 * time.Millisecond)
+}
+
+func startRaftConsensus(id int, raftConsensus *consensus.RaftConsensus, store *storage.Store) {
 	log.Println("------------------- Starting Raft Consensus ---------------------")
 	raftConsensus.Start(store)
 	log.Println("Raft consensus started on node", id)
 	log.Println("------------------- Raft Consensus Started ---------------------")
 	time.Sleep(500 * time.Millisecond)
-	// raft done
-
-	return raftConsensus
 }
 
 func Managerstart(clusterConfig Config) *clustermanager.Manager {

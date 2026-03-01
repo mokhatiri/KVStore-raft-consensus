@@ -1,8 +1,8 @@
 package storage_test
 
 import (
-	"testing"
 	"distributed-kv/storage"
+	"testing"
 )
 
 func TestStoreSet(t *testing.T) {

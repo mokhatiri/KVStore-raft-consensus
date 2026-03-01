@@ -13,6 +13,29 @@ import (
 	"distributed-kv/types"
 )
 
+// API constants
+const (
+	contentTypeJSON   = "application/json"
+	contentTypeKey    = "Content-Type"
+	methodNotAllowed  = "Method not allowed"
+	keyNotFoundErr    = "key not found"
+	requestCancelled  = "request cancelled"
+	failedEncodeResp  = "failed to encode response body: %w"
+	failedDecodeBody  = "failed to decode request body: %w"
+	invalidNodeID     = "invalid node ID: %w"
+	failedSetValue    = "failed to set value: %w"
+	failedDeleteVal   = "failed to delete value: %w"
+	failedAddServer   = "failed to add server: %w"
+	failedRemoveServ  = "failed to remove server: %w"
+	healthCheckErr    = "HTTP server error: %v"
+	serverShutErr     = "HTTP server shutdown error: %v"
+	healthEncodeErr   = "health encode error: %v"
+	stateEncodeErr    = "state encode error: %v"
+	peersEncodeErr    = "peers encode error: %v"
+	logsEncodeErr     = "logs encode error: %v"
+	raftinfoEncodeErr = "raftinfo encode error: %v"
+)
+
 // OPEN API SPECIFICATION:
 /*
 1. GET /kv/{key} - Retrieve the value for a given key.
@@ -50,101 +73,107 @@ func (s *NodeServer) Start() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// set up the HTTP handlers for the API routes
 	mux := http.NewServeMux()
-
-	// Start the HTTP server and handle routes for GET, SET, DELETE, and health check.
-	mux.HandleFunc("/kv/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			// if it's a GET, check if it's a health check or a key retrieval
-			if err := s.handleGet(w, r); err != nil {
-				http.Error(w, err.Error(), http.StatusNotFound) // 404 Not Found if the key does not exist
-			}
-		case http.MethodPost:
-			if err := s.handleSet(w, r); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest) // 400 Bad Request if the request is invalid
-			}
-		case http.MethodDelete:
-			if err := s.handleDelete(w, r); err != nil {
-				http.Error(w, err.Error(), http.StatusNotFound) // 404 Not Found if the key does not exist
-			}
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		if err := s.handleHealth(w, r); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable) // 503 Service Unavailable if the server is not healthy
-		}
-	})
-
-	// Observability endpoints for manager HTTP polling
-	mux.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		s.handleState(w, r)
-	})
-
-	mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		s.handlePeers(w, r)
-	})
-
-	mux.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		s.handleLogs(w, r)
-	})
-
-	mux.HandleFunc("/raftinfo", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		s.handleRaftInfo(w, r)
-	})
-
-	mux.HandleFunc("/cluster/add-server/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if err := s.handleAddServer(w, r); err != nil {
-			s.logBuffer.AddLog("ERROR", fmt.Sprintf("handleAddServer error: %v", err))
-		}
-	})
-
-	mux.HandleFunc("/cluster/remove-server/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if err := s.handleRemoveServer(w, r); err != nil {
-			s.logBuffer.AddLog("ERROR", fmt.Sprintf("handleRemoveServer error: %v", err))
-		}
-	})
-
+	s.registerRoutes(mux)
 	s.http_server.Handler = mux
 
 	go func() {
 		if err := s.http_server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			s.logBuffer.AddLog("ERROR", fmt.Sprintf("HTTP server error: %v", err))
+			s.logBuffer.AddLog("ERROR", fmt.Sprintf(healthCheckErr, err))
 		}
 	}()
+}
+
+func (s *NodeServer) registerRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/kv/", s.kvHandler)
+	mux.HandleFunc("/health", s.healthHandler)
+	mux.HandleFunc("/state", s.stateHandler)
+	mux.HandleFunc("/peers", s.peersHandler)
+	mux.HandleFunc("/logs", s.logsHandler)
+	mux.HandleFunc("/raftinfo", s.raftinfoHandler)
+	mux.HandleFunc("/cluster/add-server/", s.addServerHandler)
+	mux.HandleFunc("/cluster/remove-server/", s.removeServerHandler)
+}
+
+func (s *NodeServer) kvHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if err := s.handleGet(w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		}
+	case http.MethodPost:
+		if err := s.handleSet(w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+	case http.MethodDelete:
+		if err := s.handleDelete(w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		}
+	default:
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *NodeServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.handleHealth(w, r); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	}
+}
+
+func (s *NodeServer) stateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	s.handleState(w, r)
+}
+
+func (s *NodeServer) peersHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	s.handlePeers(w, r)
+}
+
+func (s *NodeServer) logsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	s.handleLogs(w, r)
+}
+
+func (s *NodeServer) raftinfoHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	s.handleRaftInfo(w, r)
+}
+
+func (s *NodeServer) addServerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.handleAddServer(w, r); err != nil {
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf("handleAddServer error: %v", err))
+	}
+}
+
+func (s *NodeServer) removeServerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, methodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.handleRemoveServer(w, r); err != nil {
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf("handleRemoveServer error: %v", err))
+	}
 }
 
 func (s *NodeServer) Stop() {
@@ -152,7 +181,7 @@ func (s *NodeServer) Stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.http_server.Shutdown(ctx); err != nil {
-		s.logBuffer.AddLog("ERROR", fmt.Sprintf("HTTP server shutdown error: %v", err))
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf(serverShutErr, err))
 	}
 }
 
@@ -161,7 +190,7 @@ func (s *NodeServer) handleGet(w http.ResponseWriter, r *http.Request) error {
 
 	select {
 	case <-r.Context().Done():
-		return fmt.Errorf("request cancelled")
+		return fmt.Errorf("%s", requestCancelled)
 	default:
 		// decode the key from the request URL
 		key := r.URL.Path[len("/kv/"):]
@@ -171,17 +200,17 @@ func (s *NodeServer) handleGet(w http.ResponseWriter, r *http.Request) error {
 		store := s.consensus.GetStore().(*storage.Store)
 		value, exists := store.Get(key)
 		if !exists {
-			return fmt.Errorf("key not found")
+			return fmt.Errorf("%s", keyNotFoundErr)
 		}
 
 		// to send the value
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeKey, contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"key":   key,
 			"value": value,
 		}); err != nil {
-			return fmt.Errorf("failed to encode response body: %w", err)
+			return fmt.Errorf(failedEncodeResp, err)
 		}
 	}
 
@@ -193,7 +222,7 @@ func (s *NodeServer) handleAddServer(w http.ResponseWriter, r *http.Request) err
 
 	select {
 	case <-r.Context().Done():
-		return fmt.Errorf("request cancelled")
+		return fmt.Errorf(requestCancelled)
 
 	default:
 		node := r.URL.Path[len("/cluster/add-server/"):]
@@ -202,7 +231,7 @@ func (s *NodeServer) handleAddServer(w http.ResponseWriter, r *http.Request) err
 		_, err := fmt.Sscanf(node, "%d", &key)
 		if err != nil {
 			http.Error(w, "Invalid node ID", http.StatusBadRequest)
-			return fmt.Errorf("invalid node ID: %w", err)
+			return fmt.Errorf(invalidNodeID, err)
 		}
 
 		// decode the value from the request body
@@ -212,24 +241,24 @@ func (s *NodeServer) handleAddServer(w http.ResponseWriter, r *http.Request) err
 		}
 		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 			http.Error(w, "Failed to decode request body", http.StatusBadRequest)
-			return fmt.Errorf("failed to decode request body: %w", err)
+			return fmt.Errorf(failedDecodeBody, err)
 		}
 
 		// use the add server handler to add the new server to the cluster
 
 		if _, err := handlers.AddServerHandler(s.consensus, key, requestBody.HTTPAddress, requestBody.RPCAddress); err != nil {
 			http.Error(w, "Failed to add server", http.StatusInternalServerError)
-			return fmt.Errorf("failed to add server: %w", err)
+			return fmt.Errorf(failedAddServer, err)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeKey, contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"key":          key,
 			"rpc_address":  requestBody.RPCAddress,
 			"http_address": requestBody.HTTPAddress,
 		}); err != nil {
-			return fmt.Errorf("failed to encode response body: %w", err)
+			return fmt.Errorf(failedEncodeResp, err)
 		}
 
 		return nil
@@ -241,7 +270,7 @@ func (s *NodeServer) handleRemoveServer(w http.ResponseWriter, r *http.Request) 
 
 	select {
 	case <-r.Context().Done():
-		return fmt.Errorf("request cancelled")
+		return fmt.Errorf("%s", requestCancelled)
 
 	default:
 		nodeID := r.URL.Path[len("/cluster/remove-server/"):]
@@ -249,21 +278,21 @@ func (s *NodeServer) handleRemoveServer(w http.ResponseWriter, r *http.Request) 
 		_, err := fmt.Sscanf(nodeID, "%d", &id)
 		if err != nil {
 			http.Error(w, "Invalid node ID", http.StatusBadRequest)
-			return fmt.Errorf("invalid node ID: %w", err)
+			return fmt.Errorf(invalidNodeID, err)
 		}
 
 		// use the remove server handler to remove the server from the cluster
 		if _, err := handlers.RemoveServerHandler(s.consensus, id); err != nil {
 			http.Error(w, "Failed to remove server", http.StatusInternalServerError)
-			return fmt.Errorf("failed to remove server: %w", err)
+			return fmt.Errorf(failedRemoveServ, err)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeKey, contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"nodeID": id,
 		}); err != nil {
-			return fmt.Errorf("failed to encode response body: %w", err)
+			return fmt.Errorf(failedEncodeResp, err)
 		}
 
 		return nil
@@ -275,7 +304,7 @@ func (s *NodeServer) handleSet(w http.ResponseWriter, r *http.Request) error {
 
 	select {
 	case <-r.Context().Done():
-		return fmt.Errorf("request cancelled")
+		return fmt.Errorf("%s", requestCancelled)
 	default:
 		key := r.URL.Path[len("/kv/"):]
 
@@ -284,22 +313,22 @@ func (s *NodeServer) handleSet(w http.ResponseWriter, r *http.Request) error {
 			Value any `json:"value"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-			return fmt.Errorf("failed to decode request body: %w", err)
+			return fmt.Errorf(failedDecodeBody, err)
 		}
 
 		// use set handler
 		if _, err := handlers.SetHandler(s.consensus, key, fmt.Sprintf("%v", requestBody.Value)); err != nil {
-			return fmt.Errorf("failed to set value: %w", err)
+			return fmt.Errorf(failedSetValue, err)
 		}
 
 		// write the response
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeKey, contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"key":   key,
 			"value": requestBody.Value,
 		}); err != nil {
-			return fmt.Errorf("failed to encode response body: %w", err)
+			return fmt.Errorf(failedEncodeResp, err)
 		}
 	}
 
@@ -311,7 +340,7 @@ func (s *NodeServer) handleDelete(w http.ResponseWriter, r *http.Request) error 
 
 	select {
 	case <-r.Context().Done():
-		return fmt.Errorf("request cancelled")
+		return fmt.Errorf("%s", requestCancelled)
 
 	default:
 		// decode the key from the request URL
@@ -319,7 +348,7 @@ func (s *NodeServer) handleDelete(w http.ResponseWriter, r *http.Request) error 
 
 		// use delete handler
 		if _, err := handlers.DeleteHandler(s.consensus, key); err != nil {
-			return fmt.Errorf("failed to delete value: %w", err)
+			return fmt.Errorf(failedDeleteVal, err)
 		}
 
 		// write the response
@@ -329,7 +358,7 @@ func (s *NodeServer) handleDelete(w http.ResponseWriter, r *http.Request) error 
 	return nil
 }
 
-func (s *NodeServer) handleHealth(w http.ResponseWriter, r *http.Request) error {
+func (s *NodeServer) handleHealth(w http.ResponseWriter, _ *http.Request) error {
 	_, role, commitIndex, logLen := s.consensus.GetNodeStatus()
 	term := s.consensus.GetCurrentTerm()
 	votedFor := s.consensus.GetVotedFor()
@@ -345,29 +374,33 @@ func (s *NodeServer) handleHealth(w http.ResponseWriter, r *http.Request) error 
 		statusCode = http.StatusServiceUnavailable
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeKey, contentTypeJSON)
 	w.WriteHeader(statusCode)
 
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"status":      healthStatus,
 		"role":        role,
 		"term":        term,
 		"votedFor":    votedFor,
 		"commitIndex": commitIndex,
 		"logLength":   logLen,
-	})
+		"isAlive":     true,
+		"lastSeen":    time.Now(),
+	}); err != nil {
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf(healthEncodeErr, err))
+	}
 
 	return nil
 }
 
 // handleState returns the current node state (used by manager for polling)
-func (s *NodeServer) handleState(w http.ResponseWriter, r *http.Request) {
+func (s *NodeServer) handleState(w http.ResponseWriter, _ *http.Request) {
 	nodeID, role, commitIndex, logLen := s.consensus.GetNodeStatus()
 	term := s.consensus.GetCurrentTerm()
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeKey, contentTypeJSON)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"id":          nodeID,
 		"role":        role,
 		"term":        term,
@@ -375,16 +408,20 @@ func (s *NodeServer) handleState(w http.ResponseWriter, r *http.Request) {
 		"logLength":   logLen,
 		"isAlive":     true,
 		"lastSeen":    time.Now(),
-	})
+	}); err != nil {
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf(stateEncodeErr, err))
+	}
 }
 
 // handlePeers returns the list of peers (used by manager to discover cluster topology)
-func (s *NodeServer) handlePeers(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+func (s *NodeServer) handlePeers(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set(contentTypeKey, contentTypeJSON)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"peers": []map[string]any{},
-	})
+	}); err != nil {
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf(peersEncodeErr, err))
+	}
 }
 
 // handleLogs returns recent node logs (used by manager for debugging)
@@ -399,28 +436,32 @@ func (s *NodeServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	logs := s.logBuffer.GetLogs(limit)
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeKey, contentTypeJSON)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"count": len(logs),
 		"logs":  logs,
-	})
+	}); err != nil {
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf(logsEncodeErr, err))
+	}
 }
 
 // handleRaftInfo returns Raft consensus information
-func (s *NodeServer) handleRaftInfo(w http.ResponseWriter, r *http.Request) {
+func (s *NodeServer) handleRaftInfo(w http.ResponseWriter, _ *http.Request) {
 	nodeID, role, commitIndex, logLen := s.consensus.GetNodeStatus()
 	term := s.consensus.GetCurrentTerm()
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeKey, contentTypeJSON)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"nodeID":       nodeID,
 		"term":         term,
 		"role":         role,
 		"commitIndex":  commitIndex,
 		"lastLogIndex": logLen,
-	})
+	}); err != nil {
+		s.logBuffer.AddLog("ERROR", fmt.Sprintf(raftinfoEncodeErr, err))
+	}
 }
 
 // parseIntQuery parses a query string parameter as an integer

@@ -274,12 +274,6 @@ func (rc *RaftConsensus) logIndex(globalIdx int) int {
 	return globalIdx - rc.lastSnapshotIndex
 }
 
-func (rc *RaftConsensus) globalIndex(localIdx int) int {
-	return localIdx + rc.lastSnapshotIndex
-}
-
-/* ----------------------------- */
-
 /*
 CanCommit checks if a log entry at a given index and term has been replicated to a majority of followers,
 and thus can be safely committed.
@@ -381,7 +375,9 @@ func (rc *RaftConsensus) TakeSnapshot() error {
 	rc.snapshotAppliedCount = 0
 
 	// Persist the compacted log
-	rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+	if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after snapshot: %v", err))
+	}
 
 	rc.node.Mu.Unlock()
 	rc.mu.Unlock()
@@ -454,13 +450,19 @@ func (rc *RaftConsensus) InstallSnapshot(term int, leaderId int, lastIncludedInd
 	rc.store.RestoreSnapshot(data)
 
 	// Persist everything
-	rc.persister.SaveSnapshot(snapshot)
+	if err := rc.persister.SaveSnapshot(snapshot); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save snapshot: %v", err))
+	}
 	rc.node.Mu.RLock()
-	rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+	if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after snapshot install: %v", err))
+	}
 	rc.node.Mu.RUnlock()
 
 	storeFilepath := rc.persister.GetStoreFilepath()
-	rc.store.SaveState(storeFilepath)
+	if err := rc.store.SaveState(storeFilepath); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save store state: %v", err))
+	}
 
 	// Update lastApplied to snapshot point
 	if rc.lastApplied < lastIncludedIndex {
@@ -514,7 +516,9 @@ func (rc *RaftConsensus) Propose(command string) (index int, term int, isLeader 
 
 	rc.node.Log = append(rc.node.Log, entry)
 	// persister
-	rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+	if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after propose: %v", err))
+	}
 
 	// Return global index (snapshot offset + local length)
 	index = rc.lastSnapshotIndex + len(rc.node.Log)
@@ -553,7 +557,9 @@ func (rc *RaftConsensus) RequestVote(term int, candidateId int, lastLogIndex int
 
 		rc.node.Mu.Lock()
 		// persist
-		rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+		if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
+			rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after term update: %v", err))
+		}
 
 		// Step down to follower if we were leader/candidate
 		rc.node.Role = "Follower"
@@ -594,7 +600,9 @@ func (rc *RaftConsensus) RequestVote(term int, candidateId int, lastLogIndex int
 	// All conditions passed - grant vote
 	rc.votedFor = candidateId
 	// persist
-	rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+	if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after granting vote: %v", err))
+	}
 	// Reset election timer when granting vote (prevents unnecessary elections)
 	rc.electionTimer.Reset(GetRandomElectionTimeout())
 
@@ -635,7 +643,9 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 
 		// save persister
 		rc.node.Mu.RLock()
-		rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
+		if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
+			rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state on AppendEntries: %v", err))
+		}
 		rc.node.Mu.RUnlock()
 	}
 	// if it's the same term, do nothing
@@ -647,56 +657,83 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 	rc.node.LeaderID = leaderId // Track the leader
 	rc.node.Mu.Unlock()
 
-	// Verify log consistency: check if we have the prevLogIndex entry with prevLogTerm
-	rc.node.Mu.RLock()
-	logLen := len(rc.node.Log)
-	var logValid bool = true
-	// Convert global prevLogIndex to local index
-	localPrevIdx := prevLogIndex - rc.lastSnapshotIndex
-	if prevLogIndex > 0 && localPrevIdx > 0 && logLen >= localPrevIdx {
-		logValid = (rc.node.Log[localPrevIdx-1].Term == prevLogTerm)
-	} else if prevLogIndex > 0 && prevLogIndex == rc.lastSnapshotIndex {
-		// prevLogIndex is exactly at the snapshot boundary
-		logValid = (rc.lastSnapshotTerm == prevLogTerm)
-	} else if prevLogIndex > 0 && localPrevIdx > logLen {
-		logValid = false
-	}
-	rc.node.Mu.RUnlock()
-
-	if prevLogIndex > 0 && !logValid {
-		// Log doesn't match at prevLogIndex, reject the append
+	// Verify log consistency
+	if !rc.verifyLogConsistency(prevLogIndex, prevLogTerm) {
 		return fmt.Errorf("log mismatch at index %d, expected term %d", prevLogIndex, prevLogTerm)
 	}
 
 	// append new entries to the log
 	if len(entries) > 0 {
-		rc.node.Mu.Lock()
-		logLen = len(rc.node.Log)
-		localPrevIdx = prevLogIndex - rc.lastSnapshotIndex
-		// If entries conflict with existing entries, overwrite them
-		if localPrevIdx > 0 && logLen > localPrevIdx {
-			// Remove conflicting entries from the local index onward
-			rc.node.Log = rc.node.Log[:localPrevIdx]
-		}
-		rc.node.Log = append(rc.node.Log, entries...) // append new entries to the log
-		rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log)
-		rc.node.Mu.Unlock()
+		rc.appendNewEntries(prevLogIndex, entries)
 	}
 
 	// Update commitIndex if leader's commit is higher
-	// commitIndex = min(leaderCommit, global index of last new entry)
-	if leaderCommit > rc.node.CommitIdx {
-		rc.node.Mu.Lock()
-		globalLastIdx := rc.lastSnapshotIndex + len(rc.node.Log)
-		if leaderCommit < globalLastIdx {
-			rc.node.CommitIdx = leaderCommit
-		} else {
-			rc.node.CommitIdx = globalLastIdx
-		}
-		rc.node.Mu.Unlock()
-	}
+	rc.updateCommitIndex(leaderCommit)
 
 	return nil
+}
+
+// verifyLogConsistency checks if we have the prevLogIndex entry with prevLogTerm
+func (rc *RaftConsensus) verifyLogConsistency(prevLogIndex int, prevLogTerm int) bool {
+	if prevLogIndex == 0 {
+		return true // No previous entry to verify
+	}
+
+	rc.node.Mu.RLock()
+	defer rc.node.Mu.RUnlock()
+
+	logLen := len(rc.node.Log)
+	localPrevIdx := prevLogIndex - rc.lastSnapshotIndex
+
+	// Check if entry is in log
+	if localPrevIdx > 0 && logLen >= localPrevIdx {
+		return rc.node.Log[localPrevIdx-1].Term == prevLogTerm
+	}
+
+	// Check if entry is at snapshot boundary
+	if prevLogIndex == rc.lastSnapshotIndex {
+		return rc.lastSnapshotTerm == prevLogTerm
+	}
+
+	// Entry is beyond our log
+	return false
+}
+
+// appendNewEntries appends entries to the log and persists them
+func (rc *RaftConsensus) appendNewEntries(prevLogIndex int, entries []types.LogEntry) {
+	rc.node.Mu.Lock()
+	defer rc.node.Mu.Unlock()
+
+	logLen := len(rc.node.Log)
+	localPrevIdx := prevLogIndex - rc.lastSnapshotIndex
+
+	// If entries conflict with existing entries, overwrite them
+	if localPrevIdx > 0 && logLen > localPrevIdx {
+		rc.node.Log = rc.node.Log[:localPrevIdx]
+	}
+
+	rc.node.Log = append(rc.node.Log, entries...)
+
+	if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after appending entries: %v", err))
+	}
+}
+
+// updateCommitIndex updates the commit index based on leader's commit
+func (rc *RaftConsensus) updateCommitIndex(leaderCommit int) {
+	if leaderCommit <= rc.node.CommitIdx {
+		return
+	}
+
+	rc.node.Mu.Lock()
+	defer rc.node.Mu.Unlock()
+
+	globalLastIdx := rc.lastSnapshotIndex + len(rc.node.Log)
+	if leaderCommit < globalLastIdx {
+		rc.node.CommitIdx = leaderCommit
+	} else {
+		rc.node.CommitIdx = globalLastIdx
+	}
 }
 
 /*
@@ -812,7 +849,9 @@ func (rc *RaftConsensus) RequestAddServer(nodeID int, rpcAddr string, httpAddr s
 
 	rc.node.Mu.Lock()
 	rc.node.Log = append(rc.node.Log, entry)
-	rc.persister.SaveState(rc.GetCurrentTerm(), rc.GetVotedFor(), rc.node.Log)
+	if err := rc.persister.SaveState(rc.GetCurrentTerm(), rc.GetVotedFor(), rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after adding server: %v", err))
+	}
 	rc.node.Peers[nodeID] = rpcAddr
 	rc.node.PeersHttp[nodeID] = httpAddr
 	rc.node.Mu.Unlock()
@@ -883,7 +922,9 @@ func (rc *RaftConsensus) RequestRemoveServer(nodeID int) error {
 
 	rc.node.Mu.Lock()
 	rc.node.Log = append(rc.node.Log, entry)
-	rc.persister.SaveState(rc.GetCurrentTerm(), rc.GetVotedFor(), rc.node.Log)
+	if err := rc.persister.SaveState(rc.GetCurrentTerm(), rc.GetVotedFor(), rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after removing server: %v", err))
+	}
 	rc.node.Mu.Unlock()
 
 	// Cleanup replication tracking for the removed peer (by next heartbeat, it will be excluded)
@@ -928,13 +969,15 @@ func (rc *RaftConsensus) FinaliseConfigChange() error {
 
 	rc.node.Mu.Lock()
 	rc.node.Log = append(rc.node.Log, entry)
-	rc.persister.SaveState(rc.GetCurrentTerm(), rc.GetVotedFor(), rc.node.Log)
+	if err := rc.persister.SaveState(rc.GetCurrentTerm(), rc.GetVotedFor(), rc.node.Log); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after finalizing config change: %v", err))
+	}
 	rc.node.Mu.Unlock()
 
 	return nil
 }
 
-func (rc *RaftConsensus) handleConfigChange(entry types.LogEntry, index int) {
+func (rc *RaftConsensus) handleConfigChange(entry types.LogEntry) {
 	if entry.ConfigChange == nil {
 		rc.logBuffer.AddLog("ERROR", "CONFIG_CHANGE entry missing ConfigChangeEntry")
 		return
@@ -942,50 +985,63 @@ func (rc *RaftConsensus) handleConfigChange(entry types.LogEntry, index int) {
 
 	switch entry.ConfigChange.Type {
 	case "AddServer", "RemoveServer":
-		// Joint consensus entry has been committed (phase 1)
-		// If we're the leader, move to phase 2 (finalize the new config)
-		rc.node.Mu.RLock()
-		isLeader := rc.node.Role == "Leader"
-		rc.node.Mu.RUnlock()
-		if isLeader {
-			if err := rc.FinaliseConfigChange(); err != nil {
-				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to finalize config change: %v", err))
-			}
-		}
-
+		rc.handleJointConsensusEntry()
 	case "FinalizeConfig":
-		// Final config entry has been committed (phase 2)
-		// Update membership and cleanup tracking
-		currentConfig := rc.GetCurrentConfig()
-		rc.logBuffer.AddLog("INFO", fmt.Sprintf("Applying finalized config change. Current config index: %d, Nodes: %v",
-			currentConfig.Index, currentConfig.Nodes))
-
-		if currentConfig != nil {
-			rc.mu.Lock()
-			// Update the nextIndex and matchIndex maps to reflect the new configuration
-			for peerID := range currentConfig.Nodes {
-				if _, exists := rc.nextIndex[peerID]; !exists {
-					rc.nextIndex[peerID] = rc.lastSnapshotIndex + len(rc.node.Log) + 1
-				}
-				if _, exists := rc.matchIndex[peerID]; !exists {
-					rc.matchIndex[peerID] = 0
-				}
-			}
-
-			// Cleanup removed nodes
-			for peerID := range rc.matchIndex {
-				if _, exists := currentConfig.Nodes[peerID]; !exists {
-					delete(rc.matchIndex, peerID)
-					delete(rc.nextIndex, peerID)
-				}
-			}
-			rc.mu.Unlock()
-		}
-
+		rc.handleFinalizeConfigEntry()
 	default:
 		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Unknown config change type: %s", entry.ConfigChange.Type))
 	}
+}
 
+// handleJointConsensusEntry handles phase 1 of config change (joint consensus)
+func (rc *RaftConsensus) handleJointConsensusEntry() {
+	rc.node.Mu.RLock()
+	isLeader := rc.node.Role == "Leader"
+	rc.node.Mu.RUnlock()
+	if isLeader {
+		if err := rc.FinaliseConfigChange(); err != nil {
+			rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to finalize config change: %v", err))
+		}
+	}
+}
+
+// handleFinalizeConfigEntry handles phase 2 of config change (applying new config)
+func (rc *RaftConsensus) handleFinalizeConfigEntry() {
+	currentConfig := rc.GetCurrentConfig()
+	if currentConfig == nil {
+		return
+	}
+
+	rc.logBuffer.AddLog("INFO", fmt.Sprintf("Applying finalized config change. Current config index: %d, Nodes: %v",
+		currentConfig.Index, currentConfig.Nodes))
+
+	rc.updateReplicationTracking(currentConfig)
+}
+
+// updateReplicationTracking updates nextIndex and matchIndex for new/removed nodes
+func (rc *RaftConsensus) updateReplicationTracking(config *types.Config) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	globalLogLen := rc.lastSnapshotIndex + len(rc.node.Log)
+
+	// Initialize tracking for new nodes in the config
+	for peerID := range config.Nodes {
+		if _, exists := rc.nextIndex[peerID]; !exists {
+			rc.nextIndex[peerID] = globalLogLen + 1
+		}
+		if _, exists := rc.matchIndex[peerID]; !exists {
+			rc.matchIndex[peerID] = 0
+		}
+	}
+
+	// Cleanup tracking for removed nodes
+	for peerID := range rc.matchIndex {
+		if _, exists := config.Nodes[peerID]; !exists {
+			delete(rc.matchIndex, peerID)
+			delete(rc.nextIndex, peerID)
+		}
+	}
 }
 
 /* ---------- Starting the consensus --------- */
@@ -1019,264 +1075,343 @@ it's a go routine because it runs concurrently with other parts of the system.
 */
 func (rc *RaftConsensus) Start(store *storage.Store) {
 	// Start goroutine to handle state transitions and message handling
-	go func() {
-		for {
-			select {
-			case <-rc.electionTimer.C:
-				rc.mu.Lock()
-				rc.node.Mu.Lock()
-
-				// check the role
-				if rc.node.Role != "Leader" {
-					rc.node.Role = "Candidate"
-					rc.currentTerm += 1
-					rc.votedFor = rc.node.ID
-
-					votesCh := make(chan bool, len(rc.node.Peers))
-
-					for peerID, peerAddr := range rc.node.Peers {
-						// for every peer, send RequestVote RPC
-						go func(addr string, pid int) {
-							// Use global log index (snapshot offset + local length)
-							lastLogIdx := rc.lastSnapshotIndex + len(rc.node.Log)
-							lastLogTerm := 0
-							if len(rc.node.Log) > 0 {
-								lastLogTerm = rc.node.Log[len(rc.node.Log)-1].Term
-							} else if rc.lastSnapshotTerm > 0 {
-								lastLogTerm = rc.lastSnapshotTerm
-							}
-							granted, _, err := rpc.SendRequestVote(addr, rc.currentTerm, rc.node.ID, lastLogIdx, lastLogTerm, rc.node.ID, pid)
-							if err == nil {
-								votesCh <- granted // true or false
-							}
-							// If error (node offline), don't send anything - ignore it
-						}(peerAddr, peerID)
-					}
-
-					peerCount := len(rc.node.Peers)
-					totalnodes := peerCount + 1
-
-					// Collect votes with timeout - stop early if we get majority
-					voteTimeout := time.NewTimer(100 * time.Millisecond)
-					votesGranted := 1 // count self-vote
-					responseCount := 0
-
-					for responseCount < peerCount {
-						select {
-						case granted := <-votesCh:
-							responseCount++
-							if granted {
-								votesGranted++
-							}
-							// Check if we have majority - elect immediately if so
-							if votesGranted > totalnodes/2 {
-								responseCount = peerCount // break out of loop
-							}
-						case <-voteTimeout.C:
-							// Timeout waiting for responses from offline nodes
-							responseCount = peerCount // break out of loop
-						}
-					}
-
-					voteTimeout.Stop() // Stop the timer after vote collection
-
-					// if majority, become leader
-					if votesGranted > totalnodes/2 {
-						rc.node.Role = "Leader"
-						rc.node.LeaderID = rc.node.ID // Track this node as leader
-						// Initialize nextIndex and matchIndex for all peers (global indices)
-						globalLogLen := rc.lastSnapshotIndex + len(rc.node.Log)
-						for peerID := range rc.node.Peers {
-							rc.nextIndex[peerID] = globalLogLen + 1
-							rc.matchIndex[peerID] = 0
-						}
-						// Immediately send heartbeats to all followers to establish leadership
-						for peerID, peerAddr := range rc.node.Peers {
-							nextIdx := rc.nextIndex[peerID]
-							prevLogIdx := nextIdx - 1
-							prevLogTerm := 0
-							localPrev := prevLogIdx - rc.lastSnapshotIndex
-							if localPrev > 0 && localPrev <= len(rc.node.Log) {
-								prevLogTerm = rc.node.Log[localPrev-1].Term
-							} else if prevLogIdx == rc.lastSnapshotIndex && rc.lastSnapshotTerm > 0 {
-								prevLogTerm = rc.lastSnapshotTerm
-							}
-							entries := []types.LogEntry{}
-							localNext := nextIdx - rc.lastSnapshotIndex
-							if localNext > 0 && localNext <= len(rc.node.Log) {
-								entries = rc.node.Log[localNext-1:]
-							}
-							go rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries, rc.node.ID, peerID)
-						}
-						rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
-					} else {
-						rc.node.Role = "Follower"
-					}
-				}
-
-				rc.node.Mu.Unlock()
-				rc.mu.Unlock()
-
-				// reset election timer after election timeout with random value
-				rc.electionTimer.Reset(GetRandomElectionTimeout())
-
-			case <-rc.heartbeatTimer.C:
-				// send AppendEntries (heartbeats) to followers if leader
-				rc.node.Mu.RLock()
-				isLeader := rc.node.Role == "Leader"
-				rc.node.Mu.RUnlock()
-				if isLeader {
-					for followerID, peerAddr := range rc.node.Peers {
-						go func(followerAddr string, fID int) {
-							// Snapshot state inside locks before RPC
-							rc.mu.Lock()
-							nextIdx := rc.nextIndex[fID]
-							currentTerm := rc.currentTerm
-							snapshotIdx := rc.lastSnapshotIndex
-							snapshotTrm := rc.lastSnapshotTerm
-							snap := rc.snapshot
-							rc.mu.Unlock()
-
-							// If follower is behind our snapshot, send InstallSnapshot instead
-							if nextIdx <= snapshotIdx && snap != nil {
-								replyTerm, err := rpc.SendInstallSnapshot(
-									followerAddr, currentTerm, rc.node.ID,
-									snapshotIdx, snapshotTrm, snap.Data,
-									rc.node.ID, fID,
-								)
-								if err != nil {
-									return
-								}
-								if replyTerm > currentTerm {
-									rc.mu.Lock()
-									rc.currentTerm = replyTerm
-									rc.votedFor = -1
-									rc.mu.Unlock()
-									rc.node.Mu.Lock()
-									rc.node.Role = "Follower"
-									rc.node.Mu.Unlock()
-									return
-								}
-								// Follower accepted snapshot, update tracking
-								rc.mu.Lock()
-								rc.matchIndex[fID] = snapshotIdx
-								rc.nextIndex[fID] = snapshotIdx + 1
-								rc.mu.Unlock()
-								return
-							}
-
-							rc.node.Mu.RLock()
-							leaderId := rc.node.ID
-							commitIdx := rc.node.CommitIdx
-							prevLogIdx := nextIdx - 1
-							prevLogTerm := 0
-							// Convert global prevLogIdx to local array index
-							localPrev := prevLogIdx - snapshotIdx
-							if localPrev > 0 && localPrev <= len(rc.node.Log) {
-								prevLogTerm = rc.node.Log[localPrev-1].Term
-							} else if prevLogIdx == snapshotIdx && snapshotTrm > 0 {
-								prevLogTerm = snapshotTrm
-							}
-							var entries []types.LogEntry
-							localNext := nextIdx - snapshotIdx
-							if localNext > 0 && localNext <= len(rc.node.Log) {
-								original := rc.node.Log[localNext-1:]
-								entries = make([]types.LogEntry, len(original))
-								copy(entries, original)
-							}
-							rc.node.Mu.RUnlock()
-
-							// RPC call with cached values
-							success, newTerm, err := rpc.SendAppendEntries(followerAddr, currentTerm, leaderId, prevLogIdx, prevLogTerm, commitIdx, entries, rc.node.ID, fID)
-
-							if err != nil {
-								return
-							}
-
-							if newTerm > currentTerm {
-								// step down if term is higher
-								rc.mu.Lock()
-								rc.currentTerm = newTerm
-								rc.votedFor = -1
-								rc.mu.Unlock()
-								rc.node.Mu.Lock()
-								rc.node.Role = "Follower"
-								rc.node.Mu.Unlock()
-								return
-							}
-
-							// update the matchIndex and nextIndex for the follower (global indices)
-							if success {
-								rc.node.Mu.RLock()
-								globalLogLen := snapshotIdx + len(rc.node.Log)
-								rc.node.Mu.RUnlock()
-
-								rc.mu.Lock()
-								rc.matchIndex[fID] = globalLogLen
-								rc.nextIndex[fID] = globalLogLen + 1
-								rc.mu.Unlock()
-
-								// calculate commit index based on matchIndex (outside lock)
-								rc.calculateCommitIndex()
-							} else {
-								// replication failed, decrement nextIndex and retry
-								rc.mu.Lock()
-								if rc.nextIndex[fID] > rc.lastSnapshotIndex+1 {
-									rc.nextIndex[fID] -= 1
-								}
-								rc.mu.Unlock()
-							}
-						}(peerAddr, followerID)
-					}
-
-					rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
-				}
-			}
-		}
-	}()
+	go rc.runElectionAndHeartbeatLoop()
 
 	// Start goroutine to apply committed log entries to state machine
-	go func() {
-		for {
-			rc.mu.Lock()
-			rc.node.Mu.RLock()
-			commitIdx := rc.node.CommitIdx
-			logLen := len(rc.node.Log)
-			snapshotOffset := rc.lastSnapshotIndex
-			rc.node.Mu.RUnlock()
-			lastApplied := rc.lastApplied
-
-			// lastApplied and commitIdx are global indices
-			// Convert to local index for array access
-			if lastApplied < commitIdx {
-				rc.lastApplied += 1
-				globalIdx := rc.lastApplied
-				localIdx := globalIdx - snapshotOffset
-				rc.mu.Unlock()
-
-				// Fetch the entry to apply while holding node lock
-				rc.node.Mu.RLock()
-				if localIdx > 0 && localIdx <= logLen {
-					entry := rc.node.Log[localIdx-1]
-					rc.node.Mu.RUnlock()
-
-					// Send to applychannel (may block)
-					rc.applyCh <- types.ApplyMsg{
-						CommandValid: true,
-						Command:      entry,
-						CommandIndex: globalIdx,
-					}
-				} else {
-					rc.node.Mu.RUnlock()
-				}
-			} else {
-				rc.mu.Unlock()
-				time.Sleep(10 * time.Millisecond) // avoid busy waiting
-			}
-		}
-	}()
+	go rc.runApplyLoop()
 
 	go rc.StartConsumption(store)
+}
+
+// runElectionAndHeartbeatLoop handles election and heartbeat logic
+func (rc *RaftConsensus) runElectionAndHeartbeatLoop() {
+	for {
+		select {
+		case <-rc.electionTimer.C:
+			rc.handleElectionTimeout()
+		case <-rc.heartbeatTimer.C:
+			rc.handleHeartbeatTimeout()
+		}
+	}
+}
+
+// handleElectionTimeout processes election timeout events
+func (rc *RaftConsensus) handleElectionTimeout() {
+	rc.mu.Lock()
+	rc.node.Mu.Lock()
+
+	if rc.node.Role != "Leader" {
+		rc.node.Role = "Candidate"
+		rc.currentTerm++
+		rc.votedFor = rc.node.ID
+
+		votesGranted := rc.conductElection()
+
+		peerCount := len(rc.node.Peers)
+		totalnodes := peerCount + 1
+
+		// if majority, become leader
+		if votesGranted > totalnodes/2 {
+			rc.becomeLeader()
+		} else {
+			rc.node.Role = "Follower"
+		}
+	}
+
+	rc.node.Mu.Unlock()
+	rc.mu.Unlock()
+
+	// reset election timer after election timeout with random value
+	rc.electionTimer.Reset(GetRandomElectionTimeout())
+}
+
+// conductElection sends RequestVote RPC to all peers and collects votes
+func (rc *RaftConsensus) conductElection() int {
+	votesCh := make(chan bool, len(rc.node.Peers))
+
+	for _, peerAddr := range rc.node.Peers {
+		go rc.sendRequestVoteToPeer(peerAddr, votesCh)
+	}
+
+	peerCount := len(rc.node.Peers)
+	votesGranted := 1 // count self-vote
+	responseCount := 0
+
+	// Collect votes with timeout - stop early if we get majority
+	voteTimeout := time.NewTimer(100 * time.Millisecond)
+	totalnodes := peerCount + 1
+
+	for responseCount < peerCount {
+		select {
+		case granted := <-votesCh:
+			responseCount++
+			if granted {
+				votesGranted++
+			}
+			// Check if we have majority - elect immediately if so
+			if votesGranted > totalnodes/2 {
+				responseCount = peerCount // break out of loop
+			}
+		case <-voteTimeout.C:
+			// Timeout waiting for responses from offline nodes
+			responseCount = peerCount // break out of loop
+		}
+	}
+
+	voteTimeout.Stop() // Stop the timer after vote collection
+	return votesGranted
+}
+
+// sendRequestVoteToPeer sends a RequestVote RPC to a single peer
+func (rc *RaftConsensus) sendRequestVoteToPeer(addr string, votesCh chan bool) {
+	// Use global log index (snapshot offset + local length)
+	lastLogIdx := rc.lastSnapshotIndex + len(rc.node.Log)
+	lastLogTerm := 0
+	if len(rc.node.Log) > 0 {
+		lastLogTerm = rc.node.Log[len(rc.node.Log)-1].Term
+	} else if rc.lastSnapshotTerm > 0 {
+		lastLogTerm = rc.lastSnapshotTerm
+	}
+	granted, _, err := rpc.SendRequestVote(addr, rc.currentTerm, rc.node.ID, lastLogIdx, lastLogTerm)
+	if err == nil {
+		votesCh <- granted // true or false
+	}
+	// If error (node offline), don't send anything - ignore it
+}
+
+// becomeLeader transitions the node to leader and sends initial heartbeats
+func (rc *RaftConsensus) becomeLeader() {
+	rc.node.Role = "Leader"
+	rc.node.LeaderID = rc.node.ID // Track this node as leader
+
+	// Initialize nextIndex and matchIndex for all peers (global indices)
+	globalLogLen := rc.lastSnapshotIndex + len(rc.node.Log)
+	for peerID := range rc.node.Peers {
+		rc.nextIndex[peerID] = globalLogLen + 1
+		rc.matchIndex[peerID] = 0
+	}
+
+	// Immediately send heartbeats to all followers to establish leadership
+	for peerID, peerAddr := range rc.node.Peers {
+		go rc.sendInitialHeartbeat(peerID, peerAddr)
+	}
+
+	rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
+}
+
+// sendInitialHeartbeat sends the initial heartbeat to a follower upon becoming leader
+func (rc *RaftConsensus) sendInitialHeartbeat(peerID int, peerAddr string) {
+	nextIdx := rc.nextIndex[peerID]
+	prevLogIdx := nextIdx - 1
+	prevLogTerm := rc.getPrevLogTerm(prevLogIdx)
+
+	entries := rc.getEntriesForReplication(nextIdx)
+
+	_, _, err := rpc.SendAppendEntries(peerAddr, rc.currentTerm, rc.node.ID, prevLogIdx, prevLogTerm, rc.node.CommitIdx, entries)
+	if err != nil {
+		rc.logBuffer.AddLog("DEBUG", fmt.Sprintf("SendAppendEntries to peer %d failed: %v", peerID, err))
+	}
+}
+
+// handleHeartbeatTimeout processes heartbeat timeout events
+func (rc *RaftConsensus) handleHeartbeatTimeout() {
+	rc.node.Mu.RLock()
+	isLeader := rc.node.Role == "Leader"
+	rc.node.Mu.RUnlock()
+
+	if isLeader {
+		for followerID, peerAddr := range rc.node.Peers {
+			go rc.replicateToFollower(followerID, peerAddr)
+		}
+		rc.heartbeatTimer.Reset(HeartbeatIntervalMs * time.Millisecond)
+	}
+}
+
+// replicateToFollower replicates log entries to a single follower
+func (rc *RaftConsensus) replicateToFollower(followerID int, followerAddr string) {
+	// Snapshot state inside locks before RPC
+	rc.mu.Lock()
+	nextIdx := rc.nextIndex[followerID]
+	currentTerm := rc.currentTerm
+	snapshotIdx := rc.lastSnapshotIndex
+	snapshotTrm := rc.lastSnapshotTerm
+	snap := rc.snapshot
+	rc.mu.Unlock()
+
+	// If follower is behind our snapshot, send InstallSnapshot instead
+	if nextIdx <= snapshotIdx && snap != nil {
+		rc.sendSnapshotToFollower(followerID, followerAddr, currentTerm, snapshotIdx, snapshotTrm)
+		return
+	}
+
+	rc.sendAppendEntriesToFollower(followerID, followerAddr, currentTerm, nextIdx, snapshotIdx, snapshotTrm)
+}
+
+// sendSnapshotToFollower sends a snapshot to a lagging follower
+func (rc *RaftConsensus) sendSnapshotToFollower(followerID int, followerAddr string, currentTerm, snapshotIdx, snapshotTrm int) {
+	replyTerm, err := rpc.SendInstallSnapshot(
+		followerAddr, currentTerm, rc.node.ID,
+		snapshotIdx, snapshotTrm, rc.snapshot.Data,
+	)
+	if err != nil {
+		return
+	}
+
+	if replyTerm > currentTerm {
+		rc.mu.Lock()
+		rc.currentTerm = replyTerm
+		rc.votedFor = -1
+		rc.mu.Unlock()
+		rc.node.Mu.Lock()
+		rc.node.Role = "Follower"
+		rc.node.Mu.Unlock()
+		return
+	}
+
+	// Follower accepted snapshot, update tracking
+	rc.mu.Lock()
+	rc.matchIndex[followerID] = snapshotIdx
+	rc.nextIndex[followerID] = snapshotIdx + 1
+	rc.mu.Unlock()
+}
+
+// sendAppendEntriesToFollower sends AppendEntries RPC to a follower
+func (rc *RaftConsensus) sendAppendEntriesToFollower(followerID int, followerAddr string, currentTerm, nextIdx, snapshotIdx, snapshotTrm int) {
+	rc.node.Mu.RLock()
+	leaderId := rc.node.ID
+	commitIdx := rc.node.CommitIdx
+	prevLogIdx := nextIdx - 1
+	prevLogTerm := rc.getPrevLogTermLocked(prevLogIdx, snapshotIdx, snapshotTrm)
+	entries := rc.getEntriesForReplicationLocked(nextIdx, snapshotIdx)
+	rc.node.Mu.RUnlock()
+
+	// RPC call with cached values
+	success, newTerm, err := rpc.SendAppendEntries(followerAddr, currentTerm, leaderId, prevLogIdx, prevLogTerm, commitIdx, entries)
+
+	if err != nil {
+		return
+	}
+
+	if newTerm > currentTerm {
+		// step down if term is higher
+		rc.mu.Lock()
+		rc.currentTerm = newTerm
+		rc.votedFor = -1
+		rc.mu.Unlock()
+		rc.node.Mu.Lock()
+		rc.node.Role = "Follower"
+		rc.node.Mu.Unlock()
+		return
+	}
+
+	// update the matchIndex and nextIndex for the follower (global indices)
+	if success {
+		rc.node.Mu.RLock()
+		globalLogLen := snapshotIdx + len(rc.node.Log)
+		rc.node.Mu.RUnlock()
+
+		rc.mu.Lock()
+		rc.matchIndex[followerID] = globalLogLen
+		rc.nextIndex[followerID] = globalLogLen + 1
+		rc.mu.Unlock()
+
+		// calculate commit index based on matchIndex (outside lock)
+		rc.calculateCommitIndex()
+	} else {
+		// replication failed, decrement nextIndex and retry
+		rc.mu.Lock()
+		if rc.nextIndex[followerID] > rc.lastSnapshotIndex+1 {
+			rc.nextIndex[followerID]--
+		}
+		rc.mu.Unlock()
+	}
+}
+
+// getPrevLogTerm calculates the term of the entry before nextIdx
+func (rc *RaftConsensus) getPrevLogTerm(prevLogIdx int) int {
+	prevLogTerm := 0
+	localPrev := prevLogIdx - rc.lastSnapshotIndex
+	if localPrev > 0 && localPrev <= len(rc.node.Log) {
+		prevLogTerm = rc.node.Log[localPrev-1].Term
+	} else if prevLogIdx == rc.lastSnapshotIndex && rc.lastSnapshotTerm > 0 {
+		prevLogTerm = rc.lastSnapshotTerm
+	}
+	return prevLogTerm
+}
+
+// getPrevLogTermLocked calculates the term of the entry before nextIdx (assumes locks are held)
+func (rc *RaftConsensus) getPrevLogTermLocked(prevLogIdx, snapshotIdx, snapshotTrm int) int {
+	prevLogTerm := 0
+	localPrev := prevLogIdx - snapshotIdx
+	if localPrev > 0 && localPrev <= len(rc.node.Log) {
+		prevLogTerm = rc.node.Log[localPrev-1].Term
+	} else if prevLogIdx == snapshotIdx && snapshotTrm > 0 {
+		prevLogTerm = snapshotTrm
+	}
+	return prevLogTerm
+}
+
+// getEntriesForReplication gets entries to replicate starting from nextIdx
+func (rc *RaftConsensus) getEntriesForReplication(nextIdx int) []types.LogEntry {
+	entries := []types.LogEntry{}
+	localNext := nextIdx - rc.lastSnapshotIndex
+	if localNext > 0 && localNext <= len(rc.node.Log) {
+		entries = rc.node.Log[localNext-1:]
+	}
+	return entries
+}
+
+// getEntriesForReplicationLocked gets entries to replicate starting from nextIdx (assumes node lock is held)
+func (rc *RaftConsensus) getEntriesForReplicationLocked(nextIdx, snapshotIdx int) []types.LogEntry {
+	entries := []types.LogEntry{}
+	localNext := nextIdx - snapshotIdx
+	if localNext > 0 && localNext <= len(rc.node.Log) {
+		original := rc.node.Log[localNext-1:]
+		entries = make([]types.LogEntry, len(original))
+		copy(entries, original)
+	}
+	return entries
+}
+
+// runApplyLoop applies committed log entries to the state machine
+func (rc *RaftConsensus) runApplyLoop() {
+	for {
+		rc.mu.Lock()
+		rc.node.Mu.RLock()
+		commitIdx := rc.node.CommitIdx
+		logLen := len(rc.node.Log)
+		snapshotOffset := rc.lastSnapshotIndex
+		rc.node.Mu.RUnlock()
+		lastApplied := rc.lastApplied
+
+		// lastApplied and commitIdx are global indices
+		// Convert to local index for array access
+		if lastApplied < commitIdx {
+			rc.lastApplied++
+			globalIdx := rc.lastApplied
+			localIdx := globalIdx - snapshotOffset
+			rc.mu.Unlock()
+
+			// Fetch the entry to apply while holding node lock
+			rc.node.Mu.RLock()
+			if localIdx > 0 && localIdx <= logLen {
+				entry := rc.node.Log[localIdx-1]
+				rc.node.Mu.RUnlock()
+
+				// Send to applychannel (may block)
+				rc.applyCh <- types.ApplyMsg{
+					CommandValid: true,
+					Command:      entry,
+					CommandIndex: globalIdx,
+				}
+			} else {
+				rc.node.Mu.RUnlock()
+			}
+		} else {
+			rc.mu.Unlock()
+			time.Sleep(10 * time.Millisecond) // avoid busy waiting
+		}
+	}
 }
 
 /*
@@ -1310,57 +1445,85 @@ func (rc *RaftConsensus) StartConsumption(store *storage.Store) {
 		rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Received committed entry: Term %d, Command: %s (index: %d)", id, entry.Term, entry.Command, applyMsg.CommandIndex))
 
 		// Execute the command on the state machine
-		switch entry.Command {
-		case "SET":
-			if entry.Key == "" {
-				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Invalid SET command: missing key", id))
-				continue
-			}
-			store.Set(entry.Key, entry.Value)
-			rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied SET %s = %v (index: %d)", id, entry.Key, entry.Value, applyMsg.CommandIndex))
-			if err := store.SaveState(storeFilepath); err != nil {
-				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to persist store state: %v", id, err))
-			}
-
-		case "DELETE":
-			if entry.Key == "" {
-				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Invalid DELETE command: missing key", id))
-				continue
-			}
-			store.Delete(entry.Key)
-			rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied DELETE %s (index: %d)", id, entry.Key, applyMsg.CommandIndex))
-			if err := store.SaveState(storeFilepath); err != nil {
-				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to persist store state: %v", id, err))
-			}
-
-		case "CLEAN":
-			rc.persister.ClearState()
-			store.ClearAll()
-			if err := store.SaveState(storeFilepath); err != nil {
-				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to persist store state after CLEAN: %v", id, err))
-			}
-			rc.node.Log = []types.LogEntry{} // clear in-memory log as well
-			rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied CLEAN all data (index: %d)", id, applyMsg.CommandIndex))
-
-		case "CONFIG_CHANGE":
-			if entry.ConfigChange != nil {
-				rc.handleConfigChange(entry, applyMsg.CommandIndex)
-			}
-
-		default:
-			rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Unknown command type: %s", id, entry.Command))
-		}
+		rc.executeCommand(store, storeFilepath, entry, id, applyMsg.CommandIndex)
 
 		// Trigger snapshot if enough entries have been applied since last snapshot
-		rc.mu.Lock()
-		rc.snapshotAppliedCount++
-		shouldSnapshot := rc.snapshotAppliedCount >= SnapshotThreshold
-		rc.mu.Unlock()
+		rc.checkAndTakeSnapshot(id)
+	}
+}
 
-		if shouldSnapshot {
-			if err := rc.TakeSnapshot(); err != nil {
-				rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to take snapshot: %v", id, err))
-			}
+// executeCommand applies a single command to the state machine
+func (rc *RaftConsensus) executeCommand(store *storage.Store, storeFilepath string, entry types.LogEntry, nodeID int, cmdIndex int) {
+	switch entry.Command {
+	case "SET":
+		rc.executeSetCommand(store, storeFilepath, entry, nodeID, cmdIndex)
+	case "DELETE":
+		rc.executeDeleteCommand(store, storeFilepath, entry, nodeID, cmdIndex)
+	case "CLEAN":
+		rc.executeCleanCommand(store, storeFilepath, nodeID, cmdIndex)
+	case "CONFIG_CHANGE":
+		rc.executeConfigChangeCommand(entry)
+	default:
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Unknown command type: %s", nodeID, entry.Command))
+	}
+}
+
+// executeSetCommand handles the SET command
+func (rc *RaftConsensus) executeSetCommand(store *storage.Store, storeFilepath string, entry types.LogEntry, nodeID int, cmdIndex int) {
+	if entry.Key == "" {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Invalid SET command: missing key", nodeID))
+		return
+	}
+	store.Set(entry.Key, entry.Value)
+	rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied SET %s = %v (index: %d)", nodeID, entry.Key, entry.Value, cmdIndex))
+	if err := store.SaveState(storeFilepath); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to persist store state: %v", nodeID, err))
+	}
+}
+
+// executeDeleteCommand handles the DELETE command
+func (rc *RaftConsensus) executeDeleteCommand(store *storage.Store, storeFilepath string, entry types.LogEntry, nodeID int, cmdIndex int) {
+	if entry.Key == "" {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Invalid DELETE command: missing key", nodeID))
+		return
+	}
+	store.Delete(entry.Key)
+	rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied DELETE %s (index: %d)", nodeID, entry.Key, cmdIndex))
+	if err := store.SaveState(storeFilepath); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to persist store state: %v", nodeID, err))
+	}
+}
+
+// executeCleanCommand handles the CLEAN command
+func (rc *RaftConsensus) executeCleanCommand(store *storage.Store, storeFilepath string, nodeID int, cmdIndex int) {
+	if err := rc.persister.ClearState(); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to clear persister state: %v", err))
+	}
+	store.ClearAll()
+	if err := store.SaveState(storeFilepath); err != nil {
+		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to persist store state after CLEAN: %v", nodeID, err))
+	}
+	rc.node.Log = []types.LogEntry{} // clear in-memory log as well
+	rc.logBuffer.AddLog("INFO", fmt.Sprintf("[Node %d] Applied CLEAN all data (index: %d)", nodeID, cmdIndex))
+}
+
+// executeConfigChangeCommand handles the CONFIG_CHANGE command
+func (rc *RaftConsensus) executeConfigChangeCommand(entry types.LogEntry) {
+	if entry.ConfigChange != nil {
+		rc.handleConfigChange(entry)
+	}
+}
+
+// checkAndTakeSnapshot checks if a snapshot should be taken and takes it if needed
+func (rc *RaftConsensus) checkAndTakeSnapshot(nodeID int) {
+	rc.mu.Lock()
+	rc.snapshotAppliedCount++
+	shouldSnapshot := rc.snapshotAppliedCount >= SnapshotThreshold
+	rc.mu.Unlock()
+
+	if shouldSnapshot {
+		if err := rc.TakeSnapshot(); err != nil {
+			rc.logBuffer.AddLog("ERROR", fmt.Sprintf("[Node %d] Failed to take snapshot: %v", nodeID, err))
 		}
 	}
 }

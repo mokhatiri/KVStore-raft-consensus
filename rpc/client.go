@@ -9,7 +9,7 @@ import (
 	"distributed-kv/types"
 )
 
-func SendRequestVote(address string, term int, candidateId int, lastLogIndex int, lastLogTerm int, nodeID int, peerID int) (succ bool, new_term int, err error) {
+func SendRequestVote(address string, term int, candidateId int, lastLogIndex int, lastLogTerm int) (succ bool, new_term int, err error) {
 
 	// connect to the RPC server with timeout
 	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
@@ -49,7 +49,7 @@ func SendRequestVote(address string, term int, candidateId int, lastLogIndex int
 	}
 }
 
-func SendAppendEntries(address string, term int, leaderId int, prevLogIndex int, prevLogTerm int, leaderCommit int, entries []types.LogEntry, nodeID int, followerID int) (success bool, new_term int, err error) {
+func SendAppendEntries(address string, term int, leaderId int, prevLogIndex int, prevLogTerm int, leaderCommit int, entries []types.LogEntry) (success bool, new_term int, err error) {
 
 	// connect to the RPC server with timeout
 	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
@@ -92,7 +92,7 @@ func SendAppendEntries(address string, term int, leaderId int, prevLogIndex int,
 }
 
 // SendInstallSnapshot sends a snapshot to a follower that is too far behind
-func SendInstallSnapshot(address string, term int, leaderId int, lastIncludedIndex int, lastIncludedTerm int, data map[string]any, nodeID int, followerID int) (replyTerm int, err error) {
+func SendInstallSnapshot(address string, term int, leaderId int, lastIncludedIndex int, lastIncludedTerm int, data map[string]any) (replyTerm int, err error) {
 
 	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 	if err != nil {
