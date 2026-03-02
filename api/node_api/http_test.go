@@ -451,7 +451,7 @@ func TestHealthContentType(t *testing.T) {
 	mock := &MockConsensus{role: "Leader", term: 1, nodeID: 1}
 	_, mux := setupTestServer(mock)
 
-	req := httptest.NewRequest(http.MethodGet, kvEndpoint+"key1", nil)
+	req := httptest.NewRequest(http.MethodGet, healthEndpoint, nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
