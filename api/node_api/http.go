@@ -222,7 +222,7 @@ func (s *NodeServer) handleAddServer(w http.ResponseWriter, r *http.Request) err
 
 	select {
 	case <-r.Context().Done():
-		return fmt.Errorf(requestCancelled)
+		return fmt.Errorf("%s", requestCancelled)
 
 	default:
 		node := r.URL.Path[len("/cluster/add-server/"):]
