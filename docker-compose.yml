@@ -1,51 +1,4 @@
-version: '3.8'
-
 services:
-  # PostgreSQL for SonarQube
-  postgres:
-    image: postgres:15-alpine
-    container_name: kvstore-postgres
-    environment:
-      POSTGRES_USER: sonar
-      POSTGRES_PASSWORD: sonarpassword
-      POSTGRES_DB: sonarqube
-    volumes:
-      - postgres_volume:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sonar"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - kvstore-network
-
-  # SonarQube
-  sonarqube:
-    image: sonarqube:10-community
-    container_name: kvstore-sonarqube
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonarqube
-      SONAR_JDBC_USERNAME: sonar
-      SONAR_JDBC_PASSWORD: sonarpassword
-    volumes:
-      - sonarqube_data:/opt/sonarqube/data
-      - sonarqube_extensions:/opt/sonarqube/extensions
-      - sonarqube_logs:/opt/sonarqube/logs
-    ports:
-      - "9000:9000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/api/system/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - kvstore-network
-
   # KVStore Manager (cluster coordinator)
   kvstore-manager:
     image: kvstore:latest
@@ -57,7 +10,7 @@ services:
       - "8080:8080"   # HTTP API
       - "6060:6060"   # pprof
     volumes:
-      - ./cluster.docker.json:/root/cluster.docker.json:ro
+      - ./cluster.docker.json:/home/kvstore/cluster.docker.json:ro
     networks:
       - kvstore-network
     healthcheck:
@@ -79,7 +32,7 @@ services:
       - "8001:8001"   # RPC
       - "6061:6060"   # pprof
     volumes:
-      - ./cluster.docker.json:/root/cluster.docker.json:ro
+      - ./cluster.docker.json:/home/kvstore/cluster.docker.json:ro
     networks:
       - kvstore-network
     healthcheck:
@@ -100,7 +53,7 @@ services:
       - "8002:8001"   # RPC
       - "6062:6060"   # pprof
     volumes:
-      - ./cluster.docker.json:/root/cluster.docker.json:ro
+      - ./cluster.docker.json:/home/kvstore/cluster.docker.json:ro
     networks:
       - kvstore-network
     healthcheck:
@@ -121,7 +74,7 @@ services:
       - "8003:8001"   # RPC
       - "6063:6060"   # pprof
     volumes:
-      - ./cluster.docker.json:/root/cluster.docker.json:ro
+      - ./cluster.docker.json:/home/kvstore/cluster.docker.json:ro
     networks:
       - kvstore-network
     healthcheck:
@@ -129,12 +82,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-volumes:
-  postgres_volume:
-  sonarqube_data:
-  sonarqube_extensions:
-  sonarqube_logs:
 
 networks:
   kvstore-network:

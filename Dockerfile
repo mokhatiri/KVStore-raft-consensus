@@ -1,7 +1,7 @@
 # Multi-stage build
 
 # Stage 1: Test and build
-FROM golang:1.25.6-alpine3.21 AS builder
+FROM golang:1.25.5-alpine3.21 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache gcc musl-dev sqlite-dev && \
@@ -27,15 +27,17 @@ FROM alpine:3.21
 # Install runtime dependencies (wget for health checks)
 RUN apk add --no-cache ca-certificates sqlite-libs wget
 
-WORKDIR /root/
+# Create a non-root user for security
+RUN addgroup -g 1000 kvstore && \
+    adduser -D -u 1000 -G kvstore kvstore
+
+WORKDIR /home/kvstore
 
 # Copy binary from builder
 COPY --from=builder /app/kvstore .
 
-# Create a non-root user for security
-RUN addgroup -g 1000 kvstore && \
-    adduser -D -u 1000 -G kvstore kvstore && \
-    chown kvstore:kvstore /root/kvstore
+# Set ownership
+RUN chown kvstore:kvstore /home/kvstore/kvstore
 
 USER kvstore
 
