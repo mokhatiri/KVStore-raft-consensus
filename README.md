@@ -111,7 +111,7 @@ go mod download
 go build -o kvstore ./app
 
 # Or use the CLI directly
-go run ./app/main.go
+go run ./app node -id 1 -config cluster.json
 ```
 
 ## Usage
@@ -124,47 +124,42 @@ Create `cluster.json`:
 
 ```json
 {
-  "nodes": {
-    "1": {
-      "id": 1,
-      "http_addr": "localhost:8001",
-      "rpc_addr": "localhost:9001"
-    },
-    "2": {
-      "id": 2,
-      "http_addr": "localhost:8002",
-      "rpc_addr": "localhost:9002"
-    },
-    "3": {
-      "id": 3,
-      "http_addr": "localhost:8003",
-      "rpc_addr": "localhost:9003"
-    }
-  }
+  "nodes": [
+    {"id": 1, "rpcAddr": "127.0.0.1:8001", "httpAddr": "127.0.0.1:9001", "pprofAddr": "127.0.0.1:6061"},
+    {"id": 2, "rpcAddr": "127.0.0.1:8002", "httpAddr": "127.0.0.1:9002", "pprofAddr": "127.0.0.1:6062"},
+    {"id": 3, "rpcAddr": "127.0.0.1:8003", "httpAddr": "127.0.0.1:9003", "pprofAddr": "127.0.0.1:6063"}
+  ],
+  "manager": {"httpAddr": "127.0.0.1:8080", "pprofAddr": "127.0.0.1:6060"}
 }
 ```
+
+RPC (node to node) uses ports 800x, the client HTTP API uses 900x.
 
 #### 2. Start nodes
 
 ```bash
 # Terminal 1 - Start Node 1
-go run ./app/main.go --node-id 1
+go run ./app node -id 1 -config cluster.json
 
 # Terminal 2 - Start Node 2
-go run ./app/main.go --node-id 2
+go run ./app node -id 2 -config cluster.json
 
 # Terminal 3 - Start Node 3
-go run ./app/main.go --node-id 3
+go run ./app node -id 3 -config cluster.json
+
+# Optional - cluster manager (status API on :8080)
+go run ./app manager -config cluster.json
 ```
 
-The cluster will elect a leader automatically within ~1.5 seconds.
+Add `-db` to a node to persist with SQLite instead of JSON files.
+The cluster elects a leader within about 1-3 seconds of start-up.
 
 ### Client Operations
 
 #### Set a key-value pair
 
 ```bash
-curl -X POST http://localhost:8001/kv/mykey \
+curl -X POST http://localhost:9001/kv/mykey \
   -H "Content-Type: application/json" \
   -d '{"value": "myvalue"}'
 ```
@@ -172,19 +167,19 @@ curl -X POST http://localhost:8001/kv/mykey \
 #### Get a key
 
 ```bash
-curl http://localhost:8001/kv/mykey
+curl http://localhost:9001/kv/mykey
 ```
 
 #### Delete a key
 
 ```bash
-curl -X DELETE http://localhost:8001/kv/mykey
+curl -X DELETE http://localhost:9001/kv/mykey
 ```
 
 #### Check node health
 
 ```bash
-curl http://localhost:8001/health
+curl http://localhost:9001/health
 ```
 
 ### Admin Operations (Manager API)
@@ -192,7 +187,7 @@ curl http://localhost:8001/health
 Get cluster status:
 
 ```bash
-curl http://localhost:8000/cluster/status
+curl http://localhost:8080/cluster/status
 ```
 
 Response:
@@ -220,14 +215,14 @@ Response:
 Get cluster nodes:
 
 ```bash
-curl http://localhost:8000/cluster/nodes
+curl http://localhost:8080/cluster/nodes
 ```
 
 ### Using the CLI
 
 ```bash
 # Start a node with CLI
-go run ./app/main.go --node-id 1
+go run ./app node -id 1 -config cluster.json
 
 # Inside CLI, available commands:
 set <key> <value>     # Set a key-value pair
@@ -372,10 +367,68 @@ Test coverage:
 go test -cover ./...
 ```
 
+### Cluster check (fault injection + latency)
+
+`scripts/cluster_check.py` starts a real 3-node cluster from a built binary,
+writes through the leader, kills the leader repeatedly and measures how long
+the survivors take to elect a new one. Nodes run in a temporary folder, so the
+repository stays clean.
+
+```bash
+go build -o kvstore ./app            # kvstore.exe on Windows
+python scripts/cluster_check.py ./kvstore --trials 10
+```
+
+Measured on a laptop (Windows 11, 3 nodes on localhost, JSON persistence,
+election timeout 150-300 ms, heartbeat 50 ms), 25 Nov 2026:
+
+| What | Result |
+|------|--------|
+| New leader after the leader is killed | median 208 ms, range 106-241 ms (10 kills) |
+| Write visible on all 3 nodes (50 sequential writes) | p50 77 ms, p99 123 ms |
+| Sequential writes, one client | 150 writes/s |
+| Burst of 30 back-to-back writes | 30/30 on every node |
+| Acknowledged writes present on every node after 10 kills and restarts | 541/541 |
+
+Numbers move between runs (other runs: re-election median 174-217 ms,
+write visible on all nodes p50 50-77 ms); they are a laptop measurement,
+not a benchmark.
+
+### Replication fixes (Nov 2026)
+
+A burst of back-to-back writes used to stall replication for good: followers
+froze at the entries of the first burst, and the leader counted entries as
+committed that no majority held. Four Raft rules were tightened:
+
+1. The leader records a follower's `matchIndex` as what it actually sent
+   (`prevLogIndex + len(entries)`), not its own log length at reply time, and
+   never moves it backwards when replies arrive out of order.
+2. A follower's rejection (log mismatch, stale term) is returned as
+   `Success=false` instead of an RPC error, so the leader backs off
+   `nextIndex` and resends the missing entries.
+3. Followers truncate their log only on a real conflict (same index,
+   different term); a delayed, shorter AppendEntries no longer erases
+   acknowledged entries.
+4. Followers advance `commitIndex` to at most the last entry the current RPC
+   vouched for (`min(leaderCommit, prevLogIndex + len(entries))`).
+
+The leader also replicates as soon as a write arrives instead of waiting for
+the next heartbeat (write visible on all nodes: p50 108 ms before, 50-77 ms
+after). Regression tests:
+`consensus/replication_test.go`.
+
 ## Performance Considerations
 
 ### Current Limitations
 
+- **Write acknowledgement**: `POST /kv/{key}` answers once the leader has
+  appended the entry, before it is committed. If the leader fails in that
+  window, an acknowledged write can still be lost. Waiting for commit before
+  answering would make writes linearizable.
+- **Persistence cost**: the JSON persister rewrites the whole log on every
+  write; use `-db` (SQLite) for long runs.
+- **No PreVote**: a node that rejoins can start an election the cluster did
+  not need (seen as extra term increments in the cluster check).
 - **HTTP Polling**: Manager API uses HTTP polling (1-2s latency)
 - **Single Leader**: All writes serialized through leader
 - **Network Timeouts**: 150ms election timeout (configurable)
