@@ -55,13 +55,13 @@ func (rs *RaftServer) AppendEntries(args *types.AppendEntriesArgs, reply *types.
 	err := rs.consensus.AppendEntries(args.Term, args.LeaderID, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Entries)
 
 	reply.Term = rs.consensus.GetCurrentTerm()
-	if err != nil {
-		reply.Success = false
-	} else {
-		reply.Success = true
-	}
+	// A rejection (stale term or log mismatch) is a normal Raft answer, not a
+	// transport failure: report it through reply.Success so the leader can step
+	// down or back off nextIndex. Returning err here would make net/rpc drop the
+	// reply, and the leader would never learn it must resend older entries.
+	reply.Success = err == nil
 
-	return err
+	return nil
 }
 
 // Ping is a simple health check endpoint that returns true if the node is alive

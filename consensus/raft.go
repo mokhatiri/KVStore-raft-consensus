@@ -523,6 +523,13 @@ func (rc *RaftConsensus) Propose(command string) (index int, term int, isLeader 
 	// Return global index (snapshot offset + local length)
 	index = rc.lastSnapshotIndex + len(rc.node.Log)
 
+	// Replicate right away instead of waiting for the next heartbeat tick;
+	// this cuts commit latency by up to one heartbeat interval. The goroutines
+	// take the locks themselves once Propose returns.
+	for peerID, peerAddr := range rc.node.Peers {
+		go rc.replicateToFollower(peerID, peerAddr)
+	}
+
 	return index, rc.currentTerm, true
 }
 
@@ -667,8 +674,9 @@ func (rc *RaftConsensus) AppendEntries(term int, leaderId int, prevLogIndex int,
 		rc.appendNewEntries(prevLogIndex, entries)
 	}
 
-	// Update commitIndex if leader's commit is higher
-	rc.updateCommitIndex(leaderCommit)
+	// Update commitIndex if leader's commit is higher, but never past the last
+	// entry this RPC vouched for: anything after it may be a stale suffix.
+	rc.updateCommitIndex(leaderCommit, prevLogIndex+len(entries))
 
 	return nil
 }
@@ -704,15 +712,29 @@ func (rc *RaftConsensus) appendNewEntries(prevLogIndex int, entries []types.LogE
 	rc.node.Mu.Lock()
 	defer rc.node.Mu.Unlock()
 
-	logLen := len(rc.node.Log)
-	localPrevIdx := prevLogIndex - rc.lastSnapshotIndex
-
-	// If entries conflict with existing entries, overwrite them
-	if localPrevIdx > 0 && logLen > localPrevIdx {
-		rc.node.Log = rc.node.Log[:localPrevIdx]
+	// Raft rule (Figure 2, AppendEntries step 3-4): only truncate on a real
+	// conflict (same index, different term), then append what is missing.
+	// Blindly truncating at prevLogIndex lets a delayed, shorter AppendEntries
+	// erase entries this follower already acknowledged.
+	changed := false
+	for i, e := range entries {
+		local := prevLogIndex + 1 + i - rc.lastSnapshotIndex
+		if local <= 0 {
+			continue // already covered by our snapshot
+		}
+		if local <= len(rc.node.Log) {
+			if rc.node.Log[local-1].Term == e.Term {
+				continue // already have this entry
+			}
+			rc.node.Log = rc.node.Log[:local-1] // conflict: drop it and everything after
+		}
+		rc.node.Log = append(rc.node.Log, entries[i:]...)
+		changed = true
+		break
 	}
-
-	rc.node.Log = append(rc.node.Log, entries...)
+	if !changed {
+		return
+	}
 
 	if err := rc.persister.SaveState(rc.currentTerm, rc.votedFor, rc.node.Log); err != nil {
 		rc.logBuffer.AddLog("ERROR", fmt.Sprintf("Failed to save state after appending entries: %v", err))
@@ -720,19 +742,24 @@ func (rc *RaftConsensus) appendNewEntries(prevLogIndex int, entries []types.LogE
 }
 
 // updateCommitIndex updates the commit index based on leader's commit
-func (rc *RaftConsensus) updateCommitIndex(leaderCommit int) {
+func (rc *RaftConsensus) updateCommitIndex(leaderCommit int, lastNewIdx int) {
+	rc.node.Mu.Lock()
+	defer rc.node.Mu.Unlock()
+
 	if leaderCommit <= rc.node.CommitIdx {
 		return
 	}
 
-	rc.node.Mu.Lock()
-	defer rc.node.Mu.Unlock()
-
-	globalLastIdx := rc.lastSnapshotIndex + len(rc.node.Log)
-	if leaderCommit < globalLastIdx {
-		rc.node.CommitIdx = leaderCommit
-	} else {
-		rc.node.CommitIdx = globalLastIdx
+	// commitIndex = min(leaderCommit, index of last new entry), Raft Figure 2
+	newCommit := leaderCommit
+	if lastNewIdx < newCommit {
+		newCommit = lastNewIdx
+	}
+	if globalLastIdx := rc.lastSnapshotIndex + len(rc.node.Log); globalLastIdx < newCommit {
+		newCommit = globalLastIdx
+	}
+	if newCommit > rc.node.CommitIdx {
+		rc.node.CommitIdx = newCommit
 	}
 }
 
@@ -1306,13 +1333,18 @@ func (rc *RaftConsensus) sendAppendEntriesToFollower(followerID int, followerAdd
 
 	// update the matchIndex and nextIndex for the follower (global indices)
 	if success {
-		rc.node.Mu.RLock()
-		globalLogLen := snapshotIdx + len(rc.node.Log)
-		rc.node.Mu.RUnlock()
+		// The follower now holds exactly what we SENT (prevLogIdx + entries),
+		// not the leader's current log, which may have grown during the RPC.
+		// Replies can also arrive out of order, so never move matchIndex back.
+		matched := prevLogIdx + len(entries)
 
 		rc.mu.Lock()
-		rc.matchIndex[followerID] = globalLogLen
-		rc.nextIndex[followerID] = globalLogLen + 1
+		if matched > rc.matchIndex[followerID] {
+			rc.matchIndex[followerID] = matched
+		}
+		if rc.nextIndex[followerID] < rc.matchIndex[followerID]+1 {
+			rc.nextIndex[followerID] = rc.matchIndex[followerID] + 1
+		}
 		rc.mu.Unlock()
 
 		// calculate commit index based on matchIndex (outside lock)
